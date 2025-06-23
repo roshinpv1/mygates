@@ -537,8 +537,12 @@ def show(scan_id, reports_dir):
         click.echo(f"❌ Report not found: {report_file}")
         sys.exit(1)
     
+    # Get API base URL from environment
+    api_base_url = os.getenv('CODEGATES_API_BASE_URL', 'http://localhost:8000')
+    api_version_prefix = os.getenv('CODEGATES_API_VERSION_PREFIX', '/api/v1')
+    
     click.echo(f"📄 Report file: {report_file.absolute()}")
-    click.echo(f"🌐 URL: http://localhost:8000/api/v1/reports/{scan_id}")
+    click.echo(f"🌐 URL: {api_base_url}{api_version_prefix}/reports/{scan_id}")
 
 
 @reports.command()

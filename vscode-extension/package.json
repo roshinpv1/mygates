@@ -60,7 +60,26 @@
         "codegates.apiUrl": {
           "type": "string",
           "default": "http://localhost:8000/api/v1",
-          "description": "CodeGates API server URL"
+          "description": "CodeGates API server URL (configurable for different environments)",
+          "examples": [
+            "http://localhost:8000/api/v1",
+            "https://codegates.example.com/api/v1",
+            "http://192.168.1.100:8000/api/v1"
+          ]
+        },
+        "codegates.apiTimeout": {
+          "type": "number",
+          "default": 300,
+          "description": "API request timeout in seconds",
+          "minimum": 30,
+          "maximum": 3600
+        },
+        "codegates.apiRetries": {
+          "type": "number",
+          "default": 3,
+          "description": "Number of API request retries",
+          "minimum": 0,
+          "maximum": 10
         }
       }
     }

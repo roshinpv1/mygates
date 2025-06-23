@@ -52,43 +52,82 @@ except ImportError:
     JIRA_AVAILABLE = False
     print("⚠️ JIRA integration not available")
 
+# Load configuration using ConfigLoader
+try:
+    from codegates.utils.config_loader import get_config
+    config = get_config()
+    
+    # Get all configuration sections
+    api_config = config.get_api_config()
+    cors_config = config.get_cors_config()
+    reports_config = config.get_reports_config()
+    
+    # Extract values
+    API_HOST = api_config['host']
+    API_PORT = api_config['port']
+    API_BASE_URL = api_config['base_url'] or f"http://localhost:{API_PORT}"
+    API_VERSION_PREFIX = api_config['version_prefix']
+    API_TITLE = api_config['title']
+    API_DESCRIPTION = api_config['description']
+    DOCS_ENABLED = api_config['docs_enabled']
+    DOCS_URL = api_config['docs_url'] if DOCS_ENABLED else None
+    REDOC_URL = api_config['redoc_url'] if DOCS_ENABLED else None
+    
+    # CORS settings
+    CORS_ORIGINS = cors_config['origins']
+    CORS_METHODS = cors_config['methods']
+    CORS_HEADERS = cors_config['headers']
+    CORS_EXPOSE_HEADERS = cors_config['expose_headers']
+    
+    print(f"✅ Configuration loaded successfully")
+    print(f"   API: {API_BASE_URL}")
+    print(f"   Host: {API_HOST}:{API_PORT}")
+    
+    # Validate configuration
+    config_issues = config.validate_config()
+    if config_issues:
+        print("⚠️ Configuration issues found:")
+        for issue in config_issues:
+            print(f"   - {issue}")
+    
+except ImportError:
+    print("⚠️ ConfigLoader not available, using fallback configuration")
+    # Fallback to original hardcoded configuration
+    API_HOST = os.getenv('CODEGATES_API_HOST', '0.0.0.0')
+    API_PORT = int(os.getenv('CODEGATES_API_PORT', '8000'))
+    API_BASE_URL = os.getenv('CODEGATES_API_BASE_URL', f'http://localhost:{API_PORT}')
+    API_VERSION_PREFIX = os.getenv('CODEGATES_API_VERSION_PREFIX', '/api/v1')
+    API_TITLE = os.getenv('CODEGATES_API_TITLE', 'MyGates API')
+    API_DESCRIPTION = os.getenv('CODEGATES_API_DESCRIPTION', 'API for validating code quality gates across different programming languages')
+    DOCS_ENABLED = os.getenv('CODEGATES_API_DOCS_ENABLED', 'true').lower() == 'true'
+    DOCS_URL = os.getenv('CODEGATES_API_DOCS_URL', '/docs') if DOCS_ENABLED else None
+    REDOC_URL = os.getenv('CODEGATES_API_REDOC_URL', '/redoc') if DOCS_ENABLED else None
+    
+    # CORS Configuration from environment
+    CORS_ORIGINS_STR = os.getenv('CODEGATES_CORS_ORIGINS', 'vscode-webview://*,http://localhost:*,http://127.0.0.1:*,https://localhost:*,https://127.0.0.1:*')
+    CORS_ORIGINS = [origin.strip() for origin in CORS_ORIGINS_STR.split(',')]
+    CORS_METHODS_STR = os.getenv('CODEGATES_CORS_METHODS', 'GET,POST,PUT,DELETE,OPTIONS,PATCH')
+    CORS_METHODS = [method.strip() for method in CORS_METHODS_STR.split(',')]
+    CORS_HEADERS_STR = os.getenv('CODEGATES_CORS_HEADERS', 'Accept,Accept-Language,Content-Language,Content-Type,Authorization,X-Requested-With,User-Agent,Origin,Access-Control-Request-Method,Access-Control-Request-Headers')
+    CORS_HEADERS = [header.strip() for header in CORS_HEADERS_STR.split(',')]
+    CORS_EXPOSE_HEADERS_STR = os.getenv('CODEGATES_CORS_EXPOSE_HEADERS', 'Content-Type,Content-Length,Date,Server')
+    CORS_EXPOSE_HEADERS = [header.strip() for header in CORS_EXPOSE_HEADERS_STR.split(',')]
+
 # Create the main FastAPI app
 app = FastAPI(
-    title="MyGates API",
-    description="API for validating code quality gates across different programming languages",
+    title=API_TITLE,
+    description=API_DESCRIPTION,
     version="1.0.0"
 )
 
 # Configure CORS for the main app
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "vscode-webview://*",  # VS Code Extension
-        "http://localhost:*",   # Local development
-        "http://127.0.0.1:*",  # Local development
-        "https://localhost:*",  # HTTPS local development
-        "https://127.0.0.1:*", # HTTPS local development
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Accept",
-        "Accept-Language",
-        "Content-Language",
-        "Content-Type",
-        "Authorization",
-        "X-Requested-With",
-        "User-Agent",
-        "Origin",
-        "Access-Control-Request-Method",
-        "Access-Control-Request-Headers",
-    ],
-    expose_headers=[
-        "Content-Type",
-        "Content-Length",
-        "Date",
-        "Server",
-    ]
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
+    expose_headers=CORS_EXPOSE_HEADERS
 )
 
 # Create a sub-application for /api/v1 routes
@@ -100,33 +139,11 @@ api_v1 = FastAPI(
 # Configure CORS for the v1 sub-application
 api_v1.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "vscode-webview://*",  # VS Code Extension
-        "http://localhost:*",   # Local development
-        "http://127.0.0.1:*",  # Local development
-        "https://localhost:*",  # HTTPS local development
-        "https://127.0.0.1:*", # HTTPS local development
-    ],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allow_headers=[
-        "Accept",
-        "Accept-Language",
-        "Content-Language", 
-        "Content-Type",
-        "Authorization",
-        "X-Requested-With",
-        "User-Agent",
-        "Origin",
-        "Access-Control-Request-Method",
-        "Access-Control-Request-Headers",
-    ],
-    expose_headers=[
-        "Content-Type",
-        "Content-Length",
-        "Date",
-        "Server",
-    ]
+    allow_methods=CORS_METHODS,
+    allow_headers=CORS_HEADERS,
+    expose_headers=CORS_EXPOSE_HEADERS
 )
 
 # In-memory storage for scan results (in production, use a database)
@@ -651,7 +668,7 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                     "score": analysis_result["score"],
                     "gates": analysis_result["gates"],
                     "recommendations": analysis_result["recommendations"],
-                    "report_url": f"http://localhost:8000/api/v1/reports/{scan_id}",
+                    "report_url": f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}",
                     "message": f"Scan completed {'with LLM enhancement' if analysis_result.get('llm_enhanced') else 'with pattern-based analysis'}",
                     "completed_at": datetime.now().isoformat(),
                     "llm_enhanced": analysis_result.get('llm_enhanced', False),
@@ -727,7 +744,7 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                                 'repository_url': request.repository_url,
                                 'branch': request.branch,
                                 'scan_id': scan_id,
-                                'report_url': f"http://localhost:8000/api/v1/reports/{scan_id}"
+                                'report_url': f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}"
                             }
                             
                             # Post to JIRA
@@ -773,6 +790,7 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                         "Try scanning a smaller repository or specific directory",
                         "Consider disabling LLM analysis for faster results"
                     ],
+                    "report_url": f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}",
                     "message": "Scan timed out - completed with basic analysis only",
                     "error": "timeout",
                     "completed_at": datetime.now().isoformat()
@@ -1049,7 +1067,7 @@ async def list_reports():
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                     "score": scan_data.get("score"),
                     "status": scan_data.get("status", "unknown"),
-                    "report_url": f"http://localhost:8000/api/v1/reports/{scan_id}"
+                    "report_url": f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}"
                 })
                 
             except Exception as e:
@@ -1140,7 +1158,7 @@ async def post_to_jira(request: JiraPostRequest):
         # Prepare additional context
         additional_context = {
             'scan_id': request.scan_id,
-            'report_url': f"http://localhost:8000/api/v1/reports/{request.scan_id}"
+            'report_url': f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{request.scan_id}"
         }
         
         # Post to JIRA
@@ -1161,7 +1179,7 @@ async def post_to_jira(request: JiraPostRequest):
 app.mount("/api/v1", api_v1)
 
 def start_server():
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host=API_HOST, port=API_PORT)
 
 if __name__ == "__main__":
     start_server() 

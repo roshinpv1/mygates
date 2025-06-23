@@ -1,0 +1,254 @@
+"""
+Configuration Loader Utility
+
+Loads configuration from environment variables, .env files, and provides
+defaults with type conversion and validation.
+"""
+
+import os
+from typing import Any, Dict, List, Optional, Union, TypeVar, Type
+from pathlib import Path
+import logging
+
+T = TypeVar('T')
+
+logger = logging.getLogger(__name__)
+
+
+class ConfigLoader:
+    """Configuration loader with environment variable support"""
+    
+    def __init__(self, env_file_paths: Optional[List[str]] = None):
+        """
+        Initialize configuration loader
+        
+        Args:
+            env_file_paths: List of .env file paths to load (in order of priority)
+        """
+        self.env_vars = {}
+        self._load_env_files(env_file_paths or ['.env', 'config/.env', 'codegates/config/.env'])
+        self._load_system_env()
+    
+    def _load_env_files(self, file_paths: List[str]):
+        """Load environment variables from .env files"""
+        for file_path in file_paths:
+            env_path = Path(file_path)
+            if env_path.exists():
+                try:
+                    with open(env_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and not line.startswith('#') and '=' in line:
+                                key, value = line.split('=', 1)
+                                # Don't override if already set (priority order)
+                                if key.strip() not in self.env_vars:
+                                    self.env_vars[key.strip()] = value.strip()
+                    logger.info(f"Loaded environment variables from {file_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to load {file_path}: {e}")
+    
+    def _load_system_env(self):
+        """Load system environment variables (highest priority)"""
+        for key, value in os.environ.items():
+            self.env_vars[key] = value
+    
+    def get(self, key: str, default: Any = None, type_class: Type[T] = str) -> T:
+        """
+        Get configuration value with type conversion
+        
+        Args:
+            key: Environment variable key
+            default: Default value if not found
+            type_class: Type to convert the value to
+            
+        Returns:
+            Converted value or default
+        """
+        value = self.env_vars.get(key)
+        
+        if value is None:
+            return default
+        
+        try:
+            return self._convert_type(value, type_class)
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Failed to convert {key}={value} to {type_class.__name__}: {e}")
+            return default
+    
+    def get_boolean(self, key: str, default: bool = False) -> bool:
+        """Get boolean configuration value"""
+        value = self.env_vars.get(key, str(default)).lower()
+        return value in ('true', '1', 'yes', 'on', 'enabled')
+    
+    def get_list(self, key: str, default: Optional[List[str]] = None, separator: str = ',') -> List[str]:
+        """Get list configuration value"""
+        value = self.env_vars.get(key)
+        if value is None:
+            return default or []
+        
+        return [item.strip() for item in value.split(separator) if item.strip()]
+    
+    def get_int(self, key: str, default: int = 0) -> int:
+        """Get integer configuration value"""
+        return self.get(key, default, int)
+    
+    def get_float(self, key: str, default: float = 0.0) -> float:
+        """Get float configuration value"""
+        return self.get(key, default, float)
+    
+    def _convert_type(self, value: str, type_class: Type[T]) -> T:
+        """Convert string value to specified type"""
+        if type_class == str:
+            return value
+        elif type_class == int:
+            return int(value)
+        elif type_class == float:
+            return float(value)
+        elif type_class == bool:
+            return value.lower() in ('true', '1', 'yes', 'on', 'enabled')
+        else:
+            # Try direct conversion
+            return type_class(value)
+    
+    def get_api_config(self) -> Dict[str, Any]:
+        """Get API server configuration"""
+        return {
+            'host': self.get('CODEGATES_API_HOST', '0.0.0.0'),
+            'port': self.get_int('CODEGATES_API_PORT', 8000),
+            'base_url': self.get('CODEGATES_API_BASE_URL'),  # Will be auto-generated if None
+            'version_prefix': self.get('CODEGATES_API_VERSION_PREFIX', '/api/v1'),
+            'title': self.get('CODEGATES_API_TITLE', 'MyGates API'),
+            'description': self.get('CODEGATES_API_DESCRIPTION', 'API for validating code quality gates across different programming languages'),
+            'docs_enabled': self.get_boolean('CODEGATES_API_DOCS_ENABLED', True),
+            'docs_url': self.get('CODEGATES_API_DOCS_URL', '/docs'),
+            'redoc_url': self.get('CODEGATES_API_REDOC_URL', '/redoc'),
+        }
+    
+    def get_cors_config(self) -> Dict[str, Any]:
+        """Get CORS configuration"""
+        return {
+            'origins': self.get_list('CODEGATES_CORS_ORIGINS', [
+                'vscode-webview://*',
+                'http://localhost:*',
+                'http://127.0.0.1:*',
+                'https://localhost:*',
+                'https://127.0.0.1:*'
+            ]),
+            'methods': self.get_list('CODEGATES_CORS_METHODS', [
+                'GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'
+            ]),
+            'headers': self.get_list('CODEGATES_CORS_HEADERS', [
+                'Accept', 'Accept-Language', 'Content-Language', 'Content-Type',
+                'Authorization', 'X-Requested-With', 'User-Agent', 'Origin',
+                'Access-Control-Request-Method', 'Access-Control-Request-Headers'
+            ]),
+            'expose_headers': self.get_list('CODEGATES_CORS_EXPOSE_HEADERS', [
+                'Content-Type', 'Content-Length', 'Date', 'Server'
+            ])
+        }
+    
+    def get_vscode_config(self) -> Dict[str, Any]:
+        """Get VS Code extension configuration"""
+        api_config = self.get_api_config()
+        base_url = api_config['base_url']
+        if not base_url:
+            base_url = f"http://localhost:{api_config['port']}"
+        
+        return {
+            'api_base_url': self.get('VSCODE_API_BASE_URL', f"{base_url}{api_config['version_prefix']}"),
+            'api_timeout': self.get_int('VSCODE_API_TIMEOUT', 300),
+            'api_retries': self.get_int('VSCODE_API_RETRIES', 3),
+        }
+    
+    def get_reports_config(self) -> Dict[str, Any]:
+        """Get reports configuration"""
+        api_config = self.get_api_config()
+        base_url = api_config['base_url']
+        if not base_url:
+            base_url = f"http://localhost:{api_config['port']}"
+        
+        return {
+            'reports_dir': self.get('CODEGATES_REPORTS_DIR', 'reports'),
+            'report_url_base': self.get('CODEGATES_REPORT_URL_BASE', f"{base_url}{api_config['version_prefix']}/reports"),
+            'html_reports_enabled': self.get_boolean('CODEGATES_HTML_REPORTS_ENABLED', True),
+        }
+    
+    def get_llm_config(self) -> Dict[str, Any]:
+        """Get LLM configuration"""
+        return {
+            'enabled': self.get_boolean('CODEGATES_LLM_ENABLED', False),
+            'provider': self.get('CODEGATES_LLM_PROVIDER', 'local'),
+            'model': self.get('CODEGATES_LLM_MODEL', 'meta-llama-3.1-8b-instruct'),
+            'temperature': self.get_float('CODEGATES_LLM_TEMPERATURE', 0.1),
+            'max_tokens': self.get_int('CODEGATES_LLM_MAX_TOKENS', 8000),
+            
+            # Provider-specific configs
+            'local': {
+                'url': self.get('LOCAL_LLM_URL', 'http://localhost:1234/v1'),
+                'api_key': self.get('LOCAL_LLM_API_KEY', 'not-needed'),
+                'model': self.get('LOCAL_LLM_MODEL', 'meta-llama-3.1-8b-instruct'),
+                'temperature': self.get_float('LOCAL_LLM_TEMPERATURE', 0.1),
+                'max_tokens': self.get_int('LOCAL_LLM_MAX_TOKENS', 8000),
+            },
+            'openai': {
+                'api_key': self.get('OPENAI_API_KEY'),
+                'base_url': self.get('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+                'model': self.get('OPENAI_MODEL', 'gpt-4'),
+                'temperature': self.get_float('OPENAI_TEMPERATURE', 0.1),
+                'max_tokens': self.get_int('OPENAI_MAX_TOKENS', 8000),
+            },
+            'anthropic': {
+                'api_key': self.get('ANTHROPIC_API_KEY'),
+                'base_url': self.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'),
+                'model': self.get('ANTHROPIC_MODEL', 'claude-3-sonnet-20240229'),
+                'temperature': self.get_float('ANTHROPIC_TEMPERATURE', 0.1),
+                'max_tokens': self.get_int('ANTHROPIC_MAX_TOKENS', 8000),
+            },
+        }
+    
+    def get_all_config(self) -> Dict[str, Any]:
+        """Get all configuration sections"""
+        return {
+            'api': self.get_api_config(),
+            'cors': self.get_cors_config(),
+            'vscode': self.get_vscode_config(),
+            'reports': self.get_reports_config(),
+            'llm': self.get_llm_config(),
+        }
+    
+    def validate_config(self) -> List[str]:
+        """Validate configuration and return list of issues"""
+        issues = []
+        
+        api_config = self.get_api_config()
+        
+        # Validate API configuration
+        if not (1 <= api_config['port'] <= 65535):
+            issues.append(f"Invalid API port: {api_config['port']} (must be 1-65535)")
+        
+        if api_config['base_url'] and not api_config['base_url'].startswith(('http://', 'https://')):
+            issues.append(f"Invalid API base URL: {api_config['base_url']} (must start with http:// or https://)")
+        
+        # Validate LLM configuration
+        llm_config = self.get_llm_config()
+        if llm_config['enabled']:
+            provider = llm_config['provider']
+            if provider not in ['openai', 'anthropic', 'local', 'gemini']:
+                issues.append(f"Unsupported LLM provider: {provider}")
+            
+            if provider == 'openai' and not llm_config['openai']['api_key']:
+                issues.append("OpenAI API key is required when using OpenAI provider")
+            
+            if provider == 'anthropic' and not llm_config['anthropic']['api_key']:
+                issues.append("Anthropic API key is required when using Anthropic provider")
+        
+        return issues
+
+
+# Global configuration loader instance
+config_loader = ConfigLoader()
+
+
+def get_config() -> ConfigLoader:
+    """Get the global configuration loader instance"""
+    return config_loader 
