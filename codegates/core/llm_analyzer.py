@@ -789,6 +789,11 @@ class LLMIntegrationManager:
         self.config = config or self._get_default_config()
         self.analyzer = LLMAnalyzer(self.config) if config else None
         self.enabled = config is not None
+        
+        # Cache for availability check
+        self._availability_cache = None
+        self._last_availability_check = None
+        self._availability_cache_duration = 300  # 5 minutes in seconds
     
     def _get_default_config(self) -> LLMConfig:
         """Get default LLM configuration"""
@@ -798,54 +803,127 @@ class LLMIntegrationManager:
             temperature=0.1
         )
     
+    def _should_check_availability(self) -> bool:
+        """Check if we need to perform availability check"""
+        if self._last_availability_check is None:
+            return True
+        
+        from datetime import datetime, timedelta
+        now = datetime.now()
+        cache_expiry = self._last_availability_check + timedelta(seconds=self._availability_cache_duration)
+        
+        return now > cache_expiry
+    
     def is_enabled(self) -> bool:
         """Check if LLM integration is properly enabled and accessible"""
         if not self.config:
             return False
+        
+        # Use cached result if available and not expired
+        if not self._should_check_availability() and self._availability_cache is not None:
+            return self._availability_cache
         
         try:
             # Test the connection with a simple request
             if self.config.provider == LLMProvider.LOCAL:
                 # For local LLM, test if the service is available
                 import requests
+                from datetime import datetime
+                
                 try:
                     # Use the configured base_url from EnvironmentLoader
                     response = requests.get(
                         f"{self.config.base_url.rstrip('/')}/models",
-                        timeout=10
+                        timeout=5  # Reduced timeout for faster checks
                     )
                     if response.status_code == 200:
                         models = response.json()
-                        print(f"🤖 Checking models at: {self.config.base_url}")
+                        
+                        # Only print on first check or when explicitly checking
+                        if self._last_availability_check is None:
+                            print(f"🤖 Checking models at: {self.config.base_url}")
            
-
                         # Check if our model is available
                         if isinstance(models, dict) and 'data' in models:
                             available_models = [model.get('id', '') for model in models['data']]
-                  
                         else:
                             available_models = []
                         
-                        if self.config.model in available_models:
-                            print(f"✅ Model {self.config.model} found and available")
-                            return True
-                        else:
-                            print(f"⚠️ Model {self.config.model} not found in local LLM service")
-                            print(f"   Available models: {available_models}")
-                            return False
+                        is_available = self.config.model in available_models
+                        
+                        # Only print on first check or when status changes
+                        if self._last_availability_check is None or self._availability_cache != is_available:
+                            if is_available:
+                                print(f"✅ Model {self.config.model} found and available")
+                            else:
+                                print(f"⚠️ Model {self.config.model} not found in local LLM service")
+                                print(f"   Available models: {available_models}")
+                        
+                        # Cache the result
+                        self._availability_cache = is_available
+                        self._last_availability_check = datetime.now()
+                        
+                        return is_available
                     else:
-                        print(f"⚠️ Local LLM service returned status {response.status_code}")
+                        if self._last_availability_check is None or self._availability_cache is not False:
+                            print(f"⚠️ Local LLM service returned status {response.status_code}")
+                        
+                        self._availability_cache = False
+                        self._last_availability_check = datetime.now()
                         return False
+                        
                 except requests.RequestException as e:
-                    print(f"⚠️ Cannot connect to local LLM service at {self.config.base_url}: {e}")
+                    if self._last_availability_check is None or self._availability_cache is not False:
+                        print(f"⚠️ Cannot connect to local LLM service at {self.config.base_url}: {e}")
+                    
+                    self._availability_cache = False
+                    self._last_availability_check = datetime.now()
                     return False
             else:
                 # For cloud providers, just check if we have the required config
-                return bool(self.config.api_key and self.config.model)
+                is_available = bool(self.config.api_key and self.config.model)
+                self._availability_cache = is_available
+                self._last_availability_check = datetime.now()
+                return is_available
                 
         except Exception as e:
-            print(f"⚠️ LLM availability check failed: {e}")
+            if self._last_availability_check is None or self._availability_cache is not False:
+                print(f"⚠️ LLM availability check failed: {e}")
+            
+            self._availability_cache = False
+            self._last_availability_check = datetime.now()
             return False
+    
+    def set_availability_cache_duration(self, seconds: int):
+        """Set the duration for caching availability checks"""
+        self._availability_cache_duration = seconds
+    
+    def get_availability_status(self) -> Dict[str, Any]:
+        """Get detailed availability status including cache info"""
+        from datetime import datetime, timedelta
+        
+        status = {
+            'enabled': self.enabled,
+            'cached_result': self._availability_cache,
+            'cache_valid': False,
+            'last_check': None,
+            'next_check': None
+        }
+        
+        if self._last_availability_check:
+            status['last_check'] = self._last_availability_check.isoformat()
+            cache_expiry = self._last_availability_check + timedelta(seconds=self._availability_cache_duration)
+            status['cache_valid'] = datetime.now() < cache_expiry
+            status['next_check'] = cache_expiry.isoformat()
+        
+        return status
+    
+    def force_availability_check(self) -> bool:
+        """Force a fresh availability check, bypassing cache"""
+        print("🔄 Forcing fresh LLM availability check...")
+        self._last_availability_check = None
+        self._availability_cache = None
+        return self.is_enabled()
     
     def enhance_gate_validation(self, 
                               gate_name: str,

@@ -6,15 +6,21 @@
  */
 
 import * as vscode from 'vscode';
-import axios, { AxiosInstance } from 'axios';
+import * as https from 'https';
+import * as http from 'http';
+import * as url from 'url';
 import * as fs from 'fs';
 import * as path from 'path';
 import { ConfigurationManager } from '../utils/configurationManager';
 import { NotificationManager } from '../utils/notificationManager';
 import { ApiConfig, ScanOptions, ScanRequest, ScanResult, GateResult, ICodeGatesRunner } from '../types/api';
 
+interface HttpResponse {
+    statusCode: number;
+    data: any;
+}
+
 export class ApiRunner implements ICodeGatesRunner {
-    private client: AxiosInstance;
     private configManager: ConfigurationManager;
     private notificationManager: NotificationManager;
     private pollingInterval: NodeJS.Timeout | null = null;
@@ -25,55 +31,79 @@ export class ApiRunner implements ICodeGatesRunner {
     ) {
         this.configManager = configManager;
         this.notificationManager = notificationManager;
-        this.client = this.createHttpClient();
         
         // Listen for configuration changes
         vscode.workspace.onDidChangeConfiguration(e => {
             if (e.affectsConfiguration('codegates.api')) {
-                this.client = this.createHttpClient();
+                // Configuration changed - no client to recreate since we're using built-in HTTP
             }
         });
     }
 
-    private createHttpClient(): AxiosInstance {
+    private async makeHttpRequest(method: string, endpoint: string, data?: any, customTimeout?: number): Promise<HttpResponse> {
         const config = this.getApiConfig();
+        const fullUrl = `${config.baseUrl}${endpoint}`;
+        const urlParts = new URL(fullUrl);
         
-        const client = axios.create({
-            baseURL: config.baseUrl,
-            timeout: config.timeout * 1000,
+        // Use shorter timeout for API calls (30 seconds) unless custom timeout specified
+        const requestTimeout = customTimeout || 30000;
+        
+        const options: any = {
+            hostname: urlParts.hostname,
+            port: urlParts.port || (urlParts.protocol === 'https:' ? 443 : 80),
+            path: urlParts.pathname + urlParts.search,
+            method: method.toUpperCase(),
             headers: {
                 'Content-Type': 'application/json',
-                'User-Agent': 'CodeGates-VSCode/1.0.0'
-            }
-        });
+                'User-Agent': 'CodeGates-VSCode/2.0.3'
+            } as any,
+            timeout: requestTimeout
+        };
 
         if (config.apiKey) {
-            client.defaults.headers.common['Authorization'] = `Bearer ${config.apiKey}`;
+            options.headers['Authorization'] = `Bearer ${config.apiKey}`;
         }
 
-        client.interceptors.request.use(
-            (config) => {
-                console.log(`API Request: ${config.method?.toUpperCase()} ${config.url}`);
-                return config;
-            },
-            (error) => {
-                console.error('API Request Error:', error);
-                return Promise.reject(error);
-            }
-        );
+        const httpModule = urlParts.protocol === 'https:' ? https : http;
 
-        client.interceptors.response.use(
-            (response) => {
-                console.log(`API Response: ${response.status} ${response.config.url}`);
-                return response;
-            },
-            (error) => {
-                console.error('API Response Error:', error.response?.status, error.response?.data);
-                return Promise.reject(error);
-            }
-        );
+        return new Promise((resolve, reject) => {
+            const req = httpModule.request(options, (res) => {
+                let responseData = '';
+                
+                res.on('data', (chunk) => {
+                    responseData += chunk;
+                });
+                
+                res.on('end', () => {
+                    try {
+                        const parsedData = responseData ? JSON.parse(responseData) : {};
+                        resolve({
+                            statusCode: res.statusCode || 0,
+                            data: parsedData
+                        });
+                    } catch (parseError) {
+                        reject(new Error(`Failed to parse response: ${parseError}`));
+                    }
+                });
+            });
 
-        return client;
+            req.on('timeout', () => {
+                req.destroy();
+                reject(new Error(`Request timeout after ${requestTimeout/1000} seconds`));
+            });
+
+            req.on('error', (error) => {
+                reject(error);
+            });
+
+            if (data) {
+                const jsonData = JSON.stringify(data);
+                options.headers['Content-Length'] = Buffer.byteLength(jsonData);
+                req.write(jsonData);
+            }
+
+            req.end();
+        });
     }
 
     private getApiConfig(): ApiConfig {
@@ -88,19 +118,17 @@ export class ApiRunner implements ICodeGatesRunner {
     async testConnection(): Promise<boolean> {
         try {
             console.log('Testing API connection to:', this.getApiConfig().baseUrl);
-            const response = await this.client.get('/health');
-            console.log('Health check response:', response.status, response.data);
-            return response.status === 200;
+            const response = await this.makeHttpRequest('GET', '/health');
+            console.log('Health check response:', response.statusCode, response.data);
+            return response.statusCode === 200;
         } catch (error: any) {
             console.error('API connection test failed:', error);
             
             // Provide specific error messages
             if (error.code === 'ECONNREFUSED') {
                 throw new Error('Cannot connect to API server. Please ensure the API server is running on http://localhost:8000');
-            } else if (error.response?.status === 404) {
-                throw new Error('API endpoint not found. Please check the API server configuration.');
-            } else if (error.response?.status >= 500) {
-                throw new Error('API server error. Please check the server logs.');
+            } else if (error.message?.includes('timeout')) {
+                throw new Error('API server connection timeout. Please check if the server is responding.');
             } else {
                 throw new Error(`API connection failed: ${error.message || 'Unknown error'}`);
             }
@@ -130,12 +158,32 @@ export class ApiRunner implements ICodeGatesRunner {
                 options 
             });
 
-            // Start the scan
-            const response = await this.client.post('/scan', requestData);
+            // Start the scan with longer timeout for the initial request
+            const response = await this.makeHttpRequest('POST', '/scan', requestData, 60000); // 60 second timeout for scan start
+            
+            if (response.statusCode >= 400) {
+                const errorData = response.data;
+                if (errorData?.detail) {
+                    const detail = errorData.detail;
+                    if (detail.includes('Repository is private')) {
+                        throw new Error('Repository is private. Please provide a GitHub token with repo scope.');
+                    }
+                    if (detail.includes('Invalid GitHub token')) {
+                        throw new Error('Invalid GitHub token. Please check if the token has the required repo scope.');
+                    }
+                    if (detail.includes('Cannot access repository')) {
+                        throw new Error('Cannot access repository. Please check if the token has access to this repository.');
+                    }
+                    throw new Error(detail);
+                }
+                throw new Error(`API request failed with status ${response.statusCode}`);
+            }
+
             const initialResult = this.transformApiResult(response.data);
 
-            // If scan is running, poll for completion
+            // If scan is running, poll for completion (up to 15 minutes)
             if (initialResult.status === 'running') {
+                console.log('Scan started, polling for completion (timeout: 15 minutes)...');
                 return await this.pollForCompletion(initialResult.scan_id);
             }
 
@@ -144,33 +192,14 @@ export class ApiRunner implements ICodeGatesRunner {
         } catch (error: any) {
             console.error('Scan repository error:', error);
             
-            // Handle specific API errors
-            if (error.response?.data?.detail) {
-                const detail = error.response.data.detail;
-                if (detail.includes('Repository is private')) {
-                    throw new Error('Repository is private. Please provide a GitHub token with repo scope.');
-                }
-                if (detail.includes('Invalid GitHub token')) {
-                    throw new Error('Invalid GitHub token. Please check if the token has the required repo scope.');
-                }
-                if (detail.includes('Cannot access repository')) {
-                    throw new Error('Cannot access repository. Please check if the token has access to this repository.');
-                }
-                throw new Error(detail);
-            }
-            
             // Handle connection errors
             if (error.code === 'ECONNREFUSED') {
                 throw new Error('Cannot connect to API server. Please start the API server first.');
             }
             
-            // Handle other errors
-            if (error.response?.status === 404) {
-                throw new Error('API endpoint not found. Please check the API server configuration.');
-            }
-            
-            if (error.response?.status >= 500) {
-                throw new Error('API server internal error. Please check the server logs.');
+            // Handle timeout errors with helpful message
+            if (error.message?.includes('timeout')) {
+                throw new Error('Repository scan timed out. Large repositories may take longer to analyze. Please try again or contact support if the issue persists.');
             }
             
             throw new Error(`Repository scan failed: ${this.getErrorMessage(error)}`);
@@ -180,60 +209,70 @@ export class ApiRunner implements ICodeGatesRunner {
     private async pollForCompletion(scanId: string): Promise<ScanResult> {
         return new Promise((resolve, reject) => {
             let attempts = 0;
-            const maxAttempts = 60; // 5 minutes at 5-second intervals
+            const maxAttempts = 180; // 15 minutes at 5-second intervals
+            const pollInterval = 5000; // 5 seconds
             
             const poll = async () => {
                 try {
                     attempts++;
                     
                     if (attempts > maxAttempts) {
-                        reject(new Error('Scan timeout - operation took too long to complete'));
+                        reject(new Error('Scan timeout - repository scan took longer than 15 minutes to complete'));
                         return;
                     }
 
+                    console.log(`Polling for scan completion: attempt ${attempts}/${maxAttempts}`);
+                    
                     const result = await this.getScanStatus(scanId);
                     
                     if (result.status === 'completed') {
+                        console.log('Scan completed successfully');
                         resolve(result);
                     } else if (result.status === 'failed') {
                         reject(new Error(result.message || 'Scan failed'));
                     } else {
                         // Still running, continue polling
-                        setTimeout(poll, 5000); // Poll every 5 seconds
+                        console.log(`Scan still running... (${Math.round(attempts * pollInterval / 1000)}s elapsed)`);
+                        setTimeout(poll, pollInterval);
                     }
-                } catch (error) {
-                    reject(error);
+                } catch (error: any) {
+                    console.error('Error during polling:', error);
+                    // If it's a network error, retry a few times before giving up
+                    if (attempts < 5 && (error.code === 'ECONNREFUSED' || error.message?.includes('timeout'))) {
+                        console.log('Network error during polling, retrying...');
+                        setTimeout(poll, pollInterval);
+                    } else {
+                        reject(error);
+                    }
                 }
             };
 
+            // Start polling
             poll();
         });
     }
 
     async getScanStatus(scanId: string): Promise<ScanResult> {
         try {
-            const response = await this.client.get(`/scan/${scanId}/status`);
+            const response = await this.makeHttpRequest('GET', `/scan/${scanId}/status`);
             return this.transformApiResult(response.data);
-        } catch (error) {
+        } catch (error: any) {
             throw new Error(`Failed to get scan status: ${this.getErrorMessage(error)}`);
         }
     }
 
     private transformApiResult(apiResult: any): ScanResult {
         return {
-            scan_id: apiResult.scan_id,
-            status: apiResult.status,
-            score: apiResult.score,
-            gates: apiResult.gates.map((gate: any) => ({
-                name: gate.name,
-                status: gate.status,
-                score: gate.score,
-                details: gate.details || []
-            })),
+            scan_id: apiResult.scan_id || '',
+            status: apiResult.status || 'unknown',
+            message: apiResult.message || '',
+            repository_url: apiResult.repository_url || '',
+            score: apiResult.score || 0,
+            gates: apiResult.gates || [],
             recommendations: apiResult.recommendations || [],
-            report_url: apiResult.report_url,
-            progress: apiResult.progress,
-            message: apiResult.message
+            report_url: apiResult.report_url || '',
+            progress: apiResult.progress || 0,
+            languages_detected: apiResult.languages_detected || []
         };
     }
 
@@ -241,8 +280,8 @@ export class ApiRunner implements ICodeGatesRunner {
         if (error.response?.data?.message) {
             return error.response.data.message;
         }
-        if (error.response?.data?.error) {
-            return error.response.data.error;
+        if (error.response?.data?.detail) {
+            return error.response.data.detail;
         }
         if (error.message) {
             return error.message;
@@ -252,7 +291,7 @@ export class ApiRunner implements ICodeGatesRunner {
 
     dispose(): void {
         if (this.pollingInterval) {
-            clearInterval(this.pollingInterval);
+            clearTimeout(this.pollingInterval);
             this.pollingInterval = null;
         }
     }

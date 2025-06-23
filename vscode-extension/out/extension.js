@@ -245,10 +245,14 @@ class CodeGatesScanPanel {
     }
 }
 function activate(context) {
-    let disposable = vscode.commands.registerCommand('codegates.scan', () => {
+    let scanDisposable = vscode.commands.registerCommand('codegates.scan', () => {
         CodeGatesScanPanel.createOrShow(context.extensionUri);
     });
-    context.subscriptions.push(disposable);
+    let configureDisposable = vscode.commands.registerCommand('codegates.configure', () => {
+        // Open VS Code settings for CodeGates
+        vscode.commands.executeCommand('workbench.action.openSettings', 'codegates');
+    });
+    context.subscriptions.push(scanDisposable, configureDisposable);
 }
 function deactivate() { }
 //# sourceMappingURL=extension.js.map
