@@ -196,21 +196,6 @@ class ScanRequest(BaseModel):
         """Check if the repository URL is from github.com."""
         parsed_url = urlparse(self.repository_url)
         return parsed_url.netloc.lower() == 'github.com'
-    
-    @property
-    def github_api_base_url(self) -> str:
-        """Get the correct GitHub API base URL for this repository."""
-        if self.is_github_com:
-            return "https://api.github.com"
-        elif self.is_github_enterprise:
-            parsed_url = urlparse(self.repository_url)
-            # GitHub Enterprise API is typically at https://github.enterprise.com/api/v3
-            return f"https://{parsed_url.netloc}/api/v3"
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail="Repository URL must be a GitHub.com or GitHub Enterprise URL"
-            )
 
     def validate_github_url(self) -> bool:
         """Validate that this is a proper GitHub URL format."""
@@ -249,7 +234,7 @@ class ScanRequest(BaseModel):
             )
 
     def check_repository_access(self):
-        """Check if repository is accessible without token first."""
+        """Check if repository is accessible using git commands instead of GitHub API."""
         try:
             # First validate the URL format
             self.validate_github_url()
@@ -271,77 +256,85 @@ class ScanRequest(BaseModel):
             if repo.endswith('.git'):
                 repo = repo[:-4]
             
-            # Get the correct API base URL for this GitHub instance
-            api_base = self.github_api_base_url
-            api_url = f"{api_base}/repos/{owner}/{repo}"
+            # Build the Git URL for testing
+            if self.github_token:
+                # Use token for authentication
+                test_url = f"https://{self.github_token}@{parsed_url.netloc}{parsed_url.path}"
+            else:
+                # Try without token first
+                test_url = f"https://{parsed_url.netloc}{parsed_url.path}"
             
-            print(f"🔍 Checking repository access: {api_url}")
+            # Ensure URL ends with .git
+            if not test_url.endswith('.git'):
+                test_url += '.git'
             
-            # Try to access repository without token first
-            response = requests.get(api_url, timeout=10)
+            print(f"🔍 Testing repository access with git ls-remote: {parsed_url.netloc}{parsed_url.path}")
             
-            if response.status_code == 200:
-                # Public repository, accessible without token
-                print(f"✅ Public repository accessible")
-                return True
-            elif response.status_code == 404:
-                # Repository not found or private
-                if self.github_token:
-                    # Try with token
-                    headers = {'Authorization': f'token {self.github_token}'}
-                    response = requests.get(api_url, headers=headers, timeout=10)
+            # Use git ls-remote to test repository access
+            # This works with both public/private repos and handles SSL certificates properly
+            cmd = ["git", "ls-remote", "--heads", test_url]
+            
+            try:
+                result = subprocess.run(
+                    cmd, 
+                    capture_output=True, 
+                    text=True, 
+                    timeout=30,
+                    env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}  # Disable interactive prompts
+                )
+                
+                if result.returncode == 0:
+                    print(f"✅ Repository accessible")
+                    return True
+                else:
+                    # Parse git error for better user messages
+                    error_output = result.stderr.lower()
                     
-                    if response.status_code == 200:
-                        print(f"✅ Private repository accessible with token")
-                        return True
-                    elif response.status_code == 401:
-                        raise HTTPException(
-                            status_code=401,
-                            detail="Invalid GitHub token. Please check if the token has the required repo scope."
-                        )
-                    elif response.status_code == 403:
-                        raise HTTPException(
-                            status_code=403,
-                            detail="Cannot access repository. Please check if the token has access to this repository."
-                        )
-                    elif response.status_code == 404:
+                    if 'authentication failed' in error_output or 'could not read username' in error_output:
+                        if self.github_token:
+                            raise HTTPException(
+                                status_code=401,
+                                detail="Invalid GitHub token or insufficient permissions. Please check if the token has 'repo' scope access."
+                            )
+                        else:
+                            raise HTTPException(
+                                status_code=401,
+                                detail="Repository is private or authentication required. Please provide a GitHub token with 'repo' scope."
+                            )
+                    elif 'repository not found' in error_output or 'not found' in error_output:
                         raise HTTPException(
                             status_code=404,
-                            detail="Repository not found. Please check the repository URL and token permissions."
+                            detail="Repository not found. Please check the repository URL."
+                        )
+                    elif 'permission denied' in error_output:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="Permission denied. Please check if the token has access to this repository."
+                        )
+                    elif 'ssl certificate' in error_output or 'certificate verify failed' in error_output:
+                        # For SSL certificate issues, suggest using token or configuring git
+                        raise HTTPException(
+                            status_code=400,
+                            detail="SSL certificate verification failed. This is common with GitHub Enterprise. Please provide a GitHub token for authentication."
                         )
                     else:
                         raise HTTPException(
-                            status_code=response.status_code,
-                            detail=f"GitHub API error: {response.text}"
+                            status_code=400,
+                            detail=f"Cannot access repository: {result.stderr.strip()}"
                         )
-                else:
-                    # No token provided for private repository
-                    raise HTTPException(
-                        status_code=401,
-                        detail="Repository is private or not found. Please provide a GitHub token with repo scope."
-                    )
-            elif response.status_code == 401:
+                        
+            except subprocess.TimeoutExpired:
                 raise HTTPException(
-                    status_code=401,
-                    detail="GitHub API authentication required. Please provide a valid GitHub token."
-                )
-            elif response.status_code == 403:
-                raise HTTPException(
-                    status_code=403,
-                    detail="GitHub API rate limit exceeded or access denied. Please provide a GitHub token."
-                )
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"GitHub API error (status {response.status_code}): {response.text}"
+                    status_code=408,
+                    detail="Repository access test timed out. Please check the repository URL and network connectivity."
                 )
                 
         except HTTPException:
             raise
-        except requests.RequestException as e:
+        except Exception as e:
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to connect to GitHub API: {str(e)}"
+                detail=f"Failed to validate repository access: {str(e)}"
             )
 
 class GateResult(BaseModel):
