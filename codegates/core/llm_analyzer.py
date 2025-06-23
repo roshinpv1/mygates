@@ -202,6 +202,7 @@ class LLMAnalyzer:
         self.enterprise_use_case_id = os.getenv("ENTERPRISE_LLM_USE_CASE_ID")
         self.token_manager = EnterpriseTokenManager() if self.enterprise_url else None
         self.client = self._initialize_client()
+        self.manager = None  # Will be set by LLMIntegrationManager for error verification
 
     def _parse_enterprise_headers(self) -> Dict[str, str]:
         """Parse enterprise LLM headers from environment variable."""
@@ -354,8 +355,21 @@ class LLMAnalyzer:
         except Exception as e:
             error_msg = str(e)
             
+            # Check if this might be a model availability issue
+            model_error_keywords = ['model', 'not found', 'does not exist', 'unknown model', 'invalid model']
+            if any(keyword in error_msg.lower() for keyword in model_error_keywords):
+                print(f"🚨 Possible model availability issue detected")
+                # Try to verify model availability
+                if hasattr(self, 'manager') and hasattr(self.manager, 'verify_model_availability_on_error'):
+                    self.manager.verify_model_availability_on_error(error_msg)
+                else:
+                    # Direct verification if no manager reference
+                    self._verify_model_on_error(error_msg)
+                    
+                raise ValueError(f"Model availability issue: {error_msg}")
+            
             # Handle specific context length errors
-            if any(keyword in error_msg.lower() for keyword in ['context', 'token', 'length', 'overflow']):
+            elif any(keyword in error_msg.lower() for keyword in ['context', 'token', 'length', 'overflow']):
                 print(f"❌ Context length error: {error_msg}")
                 raise ValueError(f"Context too large for LLM: {error_msg}")
             
@@ -368,6 +382,24 @@ class LLMAnalyzer:
             else:
                 print(f"❌ LLM request failed: {error_msg}")
                 raise Exception(f"LLM analysis failed: {error_msg}")
+    
+    def _verify_model_on_error(self, error_message: str):
+        """Verify model availability when an LLM call fails (fallback method)"""
+        if self.config.provider != LLMProvider.LOCAL:
+            return
+        
+        try:
+            import requests
+            response = requests.get(f"{self.config.base_url.rstrip('/')}/models", timeout=5)
+            if response.status_code == 200:
+                models = response.json()
+                if isinstance(models, dict) and 'data' in models:
+                    available_models = [model.get('id', '') for model in models['data']]
+                    if self.config.model not in available_models:
+                        print(f"❌ Confirmed: Model {self.config.model} not available")
+                        print(f"   Available models: {available_models}")
+        except Exception:
+            pass  # Ignore verification errors
 
     def _make_enterprise_request(self, prompt: str) -> str:
         """Make request to enterprise LLM endpoint with token management."""
@@ -790,6 +822,10 @@ class LLMIntegrationManager:
         self.analyzer = LLMAnalyzer(self.config) if config else None
         self.enabled = config is not None
         
+        # Pass manager reference to analyzer for error verification
+        if self.analyzer:
+            self.analyzer.manager = self
+        
         # Cache for availability check
         self._availability_cache = None
         self._last_availability_check = None
@@ -823,75 +859,111 @@ class LLMIntegrationManager:
         if not self._should_check_availability() and self._availability_cache is not None:
             return self._availability_cache
         
-        try:
-            # Test the connection with a simple request
-            if self.config.provider == LLMProvider.LOCAL:
-                # For local LLM, test if the service is available
+        # For cloud providers, just check if we have the required config (no HTTP call)
+        if self.config.provider != LLMProvider.LOCAL:
+            is_available = bool(self.config.api_key and self.config.model)
+            self._availability_cache = is_available
+            self._last_availability_check = datetime.now()
+            return is_available
+        
+        # For local LLM, assume it's working unless we've had a recent failure
+        # Only do the HTTP check if this is the first time or if cache expired
+        if self._last_availability_check is None:
+            # First time - do a quick check
+            try:
                 import requests
                 from datetime import datetime
                 
-                try:
-                    # Use the configured base_url from EnvironmentLoader
-                    response = requests.get(
-                        f"{self.config.base_url.rstrip('/')}/models",
-                        timeout=5  # Reduced timeout for faster checks
-                    )
-                    if response.status_code == 200:
-                        models = response.json()
-                        
-                        # Only print on first check or when explicitly checking
-                        if self._last_availability_check is None:
-                            print(f"🤖 Checking models at: {self.config.base_url}")
-           
-                        # Check if our model is available
-                        if isinstance(models, dict) and 'data' in models:
-                            available_models = [model.get('id', '') for model in models['data']]
-                        else:
-                            available_models = []
-                        
-                        is_available = self.config.model in available_models
-                        
-                        # Only print on first check or when status changes
-                        if self._last_availability_check is None or self._availability_cache != is_available:
-                            if is_available:
-                                print(f"✅ Model {self.config.model} found and available")
-                            else:
-                                print(f"⚠️ Model {self.config.model} not found in local LLM service")
-                                print(f"   Available models: {available_models}")
-                        
-                        # Cache the result
-                        self._availability_cache = is_available
-                        self._last_availability_check = datetime.now()
-                        
-                        return is_available
-                    else:
-                        if self._last_availability_check is None or self._availability_cache is not False:
-                            print(f"⚠️ Local LLM service returned status {response.status_code}")
-                        
-                        self._availability_cache = False
-                        self._last_availability_check = datetime.now()
-                        return False
-                        
-                except requests.RequestException as e:
-                    if self._last_availability_check is None or self._availability_cache is not False:
-                        print(f"⚠️ Cannot connect to local LLM service at {self.config.base_url}: {e}")
+                response = requests.get(
+                    f"{self.config.base_url.rstrip('/')}/models",
+                    timeout=2  # Very quick timeout
+                )
+                
+                if response.status_code == 200:
+                    models = response.json()
+                    print(f"🤖 LLM service available at: {self.config.base_url}")
                     
+                    # Check if our model is available
+                    if isinstance(models, dict) and 'data' in models:
+                        available_models = [model.get('id', '') for model in models['data']]
+                    else:
+                        available_models = []
+                    
+                    is_available = self.config.model in available_models
+                    
+                    if is_available:
+                        print(f"✅ Model {self.config.model} confirmed available")
+                    else:
+                        print(f"⚠️ Model {self.config.model} not found, but will try to use it anyway")
+                        print(f"   Available models: {available_models}")
+                        # Still return True - let the actual LLM call fail if model is wrong
+                        is_available = True
+                    
+                    self._availability_cache = is_available
+                    self._last_availability_check = datetime.now()
+                    return is_available
+                else:
+                    print(f"⚠️ LLM service check failed with status {response.status_code}, assuming available")
+                    # Assume it's working - let LLM calls handle the errors
+                    self._availability_cache = True
+                    self._last_availability_check = datetime.now()
+                    return True
+                    
+            except Exception as e:
+                print(f"⚠️ LLM service check failed: {e}, assuming available")
+                # Assume it's working - let LLM calls handle the errors
+                self._availability_cache = True
+                self._last_availability_check = datetime.now()
+                return True
+        else:
+            # Not first time and cache hasn't expired - assume it's working
+            return self._availability_cache if self._availability_cache is not None else True
+    
+    def verify_model_availability_on_error(self, error_message: str) -> bool:
+        """Verify model availability when an LLM call fails"""
+        print(f"🔍 LLM call failed, verifying model availability...")
+        print(f"   Error: {error_message}")
+        
+        if self.config.provider != LLMProvider.LOCAL:
+            print("   Cloud provider - cannot verify model list")
+            return False
+        
+        try:
+            import requests
+            from datetime import datetime
+            
+            response = requests.get(
+                f"{self.config.base_url.rstrip('/')}/models",
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                models = response.json()
+                print(f"🤖 Checking available models at: {self.config.base_url}")
+                
+                if isinstance(models, dict) and 'data' in models:
+                    available_models = [model.get('id', '') for model in models['data']]
+                else:
+                    available_models = []
+                
+                if self.config.model in available_models:
+                    print(f"✅ Model {self.config.model} is available - error might be temporary")
+                    return True
+                else:
+                    print(f"❌ Model {self.config.model} not found in LLM service")
+                    print(f"   Available models: {available_models}")
+                    print(f"   Please update your model name or load the correct model")
+                    
+                    # Update cache to reflect the issue
                     self._availability_cache = False
                     self._last_availability_check = datetime.now()
                     return False
             else:
-                # For cloud providers, just check if we have the required config
-                is_available = bool(self.config.api_key and self.config.model)
-                self._availability_cache = is_available
-                self._last_availability_check = datetime.now()
-                return is_available
+                print(f"⚠️ LLM service returned status {response.status_code}")
+                return False
                 
         except Exception as e:
-            if self._last_availability_check is None or self._availability_cache is not False:
-                print(f"⚠️ LLM availability check failed: {e}")
-            
-            self._availability_cache = False
-            self._last_availability_check = datetime.now()
+            print(f"⚠️ Failed to verify model availability: {e}")
             return False
     
     def set_availability_cache_duration(self, seconds: int):

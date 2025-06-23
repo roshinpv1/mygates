@@ -66,6 +66,15 @@ try:
     API_HOST = api_config['host']
     API_PORT = api_config['port']
     API_BASE_URL = api_config['base_url'] or f"http://localhost:{API_PORT}"
+    
+    # DEBUG: Ensure API_BASE_URL has correct format
+    if API_BASE_URL and not ':' in API_BASE_URL.replace('://', ''):
+        # If API_BASE_URL doesn't have a port, add the default port
+        if API_BASE_URL.endswith('/'):
+            API_BASE_URL = API_BASE_URL.rstrip('/')
+        API_BASE_URL = f"{API_BASE_URL}:{API_PORT}"
+        print(f"🔧 Fixed API_BASE_URL to include port: {API_BASE_URL}")
+    
     API_VERSION_PREFIX = api_config['version_prefix']
     API_TITLE = api_config['title']
     API_DESCRIPTION = api_config['description']
@@ -96,6 +105,15 @@ except ImportError:
     API_HOST = os.getenv('CODEGATES_API_HOST', '0.0.0.0')
     API_PORT = int(os.getenv('CODEGATES_API_PORT', '8000'))
     API_BASE_URL = os.getenv('CODEGATES_API_BASE_URL', f'http://localhost:{API_PORT}')
+    
+    # DEBUG: Ensure API_BASE_URL has correct format (fallback section)
+    if API_BASE_URL and not ':' in API_BASE_URL.replace('://', ''):
+        # If API_BASE_URL doesn't have a port, add the default port
+        if API_BASE_URL.endswith('/'):
+            API_BASE_URL = API_BASE_URL.rstrip('/')
+        API_BASE_URL = f"{API_BASE_URL}:{API_PORT}"
+        print(f"🔧 Fixed fallback API_BASE_URL to include port: {API_BASE_URL}")
+    
     API_VERSION_PREFIX = os.getenv('CODEGATES_API_VERSION_PREFIX', '/api/v1')
     API_TITLE = os.getenv('CODEGATES_API_TITLE', 'MyGates API')
     API_DESCRIPTION = os.getenv('CODEGATES_API_DESCRIPTION', 'API for validating code quality gates across different programming languages')
@@ -716,6 +734,11 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                 except Exception as report_error:
                     print(f"⚠️ Failed to generate HTML report: {report_error}")
                     # Continue without failing the scan
+                
+                # Log API_BASE_URL for debugging
+                print(f"🔍 DEBUG: API_BASE_URL = '{API_BASE_URL}'")
+                print(f"🔍 DEBUG: API_VERSION_PREFIX = '{API_VERSION_PREFIX}'")
+                print(f"🔍 DEBUG: Full report URL = '{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}'")
                 
                 # JIRA Integration (if enabled and available)
                 jira_result = None
