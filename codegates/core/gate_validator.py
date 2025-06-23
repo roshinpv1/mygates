@@ -27,17 +27,31 @@ class GateValidator:
         self.gate_scorer = GateScorer()
         self.validator_factory = GateValidatorFactory()
         
-    def validate(self, target_path: Path, llm_manager=None) -> ValidationResult:
-        """Perform complete validation of the codebase"""
+    def validate(self, target_path: Path, llm_manager=None, repository_url: Optional[str] = None) -> ValidationResult:
+        """Validate hard gates for the target codebase"""
         
         start_time = time.time()
         
         # Wrap LLM manager with fast optimizer
         fast_llm_manager = FastLLMIntegrationManager(llm_manager) if llm_manager else None
         
+        # Extract project name from repository URL if provided, otherwise use directory name
+        project_name = target_path.name  # fallback
+        if repository_url:
+            try:
+                from urllib.parse import urlparse
+                url_parts = repository_url.rstrip('/').split('/')
+                if len(url_parts) >= 2:
+                    project_name = url_parts[-1]
+                    if project_name.endswith('.git'):
+                        project_name = project_name[:-4]
+            except Exception:
+                # If URL parsing fails, keep the directory name
+                project_name = target_path.name
+        
         # Initialize result
         result = ValidationResult(
-            project_name=target_path.name,
+            project_name=project_name,
             project_path=str(target_path),
             language=Language.PYTHON,  # Will be updated
             scan_duration=0.0
@@ -308,6 +322,16 @@ class GateValidator:
         
         # Calculate final scores
         coverage = (total_found / total_expected * 100) if total_expected > 0 else 0.0
+
+        # Special handling for "negative" gates where lower found count is better
+        # For gates where expected = 0 (like avoid_logging_secrets), 
+        # found = 0 means perfect implementation (100% coverage)
+        if total_expected == 0:
+            if total_found == 0:
+                coverage = 100.0  # Perfect: no violations found
+            else:
+                coverage = max(0.0, 100.0 - (total_found * 10))  # Penalty for violations
+
         avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
         
         # Ensure avg_quality is never None and is within valid range

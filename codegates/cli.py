@@ -24,7 +24,6 @@ from codegates.core.llm_analyzer import LLMConfig, LLMProvider, LLMIntegrationMa
 from codegates.utils.env_loader import EnvironmentLoader
 from codegates.api.services.github import GitHubService
 from codegates.api.utils import validate_github_token, validate_github_url
-from codegates.reports.html_generator import HTMLReportGenerator
 
 console = Console()
 

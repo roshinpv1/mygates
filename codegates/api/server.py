@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import uvicorn
@@ -383,7 +384,7 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None) ->
             shutil.rmtree(temp_dir)
         raise e
 
-def analyze_repository(repo_path: str, threshold: int) -> Dict:
+def analyze_repository(repo_path: str, threshold: int, repository_url: Optional[str] = None) -> Dict:
     """Analyze repository using CodeGates"""
     try:
         # Try to import and use the actual CodeGates analysis
@@ -485,7 +486,7 @@ def analyze_repository(repo_path: str, threshold: int) -> Dict:
             
             # Run validation
             validator = GateValidator(config)
-            result = validator.validate(Path(repo_path), llm_manager)
+            result = validator.validate(Path(repo_path), llm_manager, repository_url)
             
             print(f"📊 Analysis completed. Overall score: {result.overall_score:.1f}%")
             print(f"📈 Gates analyzed: {len(result.gate_scores)}")
@@ -640,7 +641,7 @@ async def perform_scan(scan_id: str, request: ScanRequest):
             # Use asyncio timeout for better control
             try:
                 analysis_result = await asyncio.wait_for(
-                    asyncio.to_thread(analyze_repository, repo_path, threshold),
+                    asyncio.to_thread(analyze_repository, repo_path, threshold, request.repository_url),
                     timeout=180.0  # 3 minutes timeout
                 )
                 
@@ -665,9 +666,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                 try:
                     validation_result = analysis_result.get('result_object')
                     if validation_result:
-                        from codegates.reports.html_generator import HTMLReportGenerator
-                        
-                        generator = HTMLReportGenerator()
+                        from codegates.reports import ReportGenerator
+                        from codegates.models import ReportConfig
                         
                         # Create reports directory if it doesn't exist
                         reports_dir = Path("reports")
@@ -677,13 +677,21 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                         report_filename = f"hard_gate_report_{scan_id}.html"
                         report_path = reports_dir / report_filename
                         
-                        # Generate report file with repository context
-                        generator.generate_report(
-                            validation_result, 
-                            str(report_path),
-                            repository_url=request.repository_url,
-                            branch=request.branch
+                        # Create report config for HTML generation
+                        report_config = ReportConfig(
+                            format='html',
+                            output_path=str(reports_dir),
+                            include_details=True,
+                            include_recommendations=True
                         )
+                        
+                        # Generate HTML report
+                        generator = ReportGenerator(report_config)
+                        html_content = generator._generate_html_content(validation_result)
+                        
+                        # Save the HTML file
+                        with open(report_path, 'w', encoding='utf-8') as f:
+                            f.write(html_content)
                         
                         print(f"📄 HTML report saved to: {report_path}")
                         scan_results[scan_id]["report_file"] = str(report_path)
@@ -886,7 +894,6 @@ async def get_html_report(scan_id: str):
                     with open(report_path, 'r', encoding='utf-8') as f:
                         html_content = f.read()
                     
-                    from fastapi.responses import HTMLResponse
                     return HTMLResponse(content=html_content, status_code=200)
                 except Exception as file_error:
                     print(f"⚠️ Failed to read saved report file: {file_error}")
@@ -902,7 +909,6 @@ async def get_html_report(scan_id: str):
                 with open(report_path, 'r', encoding='utf-8') as f:
                     html_content = f.read()
                 
-                from fastapi.responses import HTMLResponse
                 return HTMLResponse(content=html_content, status_code=200)
             except Exception as file_error:
                 print(f"⚠️ Failed to read report file: {file_error}")
@@ -919,9 +925,8 @@ async def get_html_report(scan_id: str):
         
         # Generate HTML report
         try:
-            from codegates.reports.html_generator import HTMLReportGenerator
-            
-            generator = HTMLReportGenerator()
+            from codegates.reports import ReportGenerator
+            from codegates.models import ReportConfig
             
             # Create reports directory if it doesn't exist
             reports_dir = Path("reports")
@@ -931,22 +936,25 @@ async def get_html_report(scan_id: str):
             report_filename = f"hard_gate_report_{scan_id}.html"
             report_path = reports_dir / report_filename
             
-            # Generate report file
-            generator.generate_report(
-                validation_result, 
-                str(report_path),
-                repository_url=result.get("repository_url"),
-                branch=result.get("branch")
+            # Create report config for HTML generation
+            report_config = ReportConfig(
+                format='html',
+                output_path=str(reports_dir),
+                include_details=True,
+                include_recommendations=True
             )
             
-            # Update scan result with report file path
+            # Generate HTML report
+            generator = ReportGenerator(report_config)
+            html_content = generator._generate_html_content(validation_result)
+            
+            # Save the HTML file
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"📄 HTML report saved to: {report_path}")
             scan_results[scan_id]["report_file"] = str(report_path)
             
-            # Return the saved HTML file
-            with open(report_path, 'r', encoding='utf-8') as f:
-                html_content = f.read()
-            
-            from fastapi.responses import HTMLResponse
             return HTMLResponse(content=html_content, status_code=200)
             
         except ImportError:
