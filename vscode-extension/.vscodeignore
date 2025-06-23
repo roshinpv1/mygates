@@ -9,4 +9,10 @@ vsc-extension-quickstart.md
 **/*.map
 **/*.ts
 node_modules/**
-*.vsix 
+.npm
+.nvmrc
+build.sh
+BUILD.md
+*.vsix
+package-lock.json
+yarn.lock 

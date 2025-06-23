@@ -2,14 +2,15 @@
   "name": "codegates",
   "displayName": "CodeGates - Hard Gate Validator",
   "description": "API-driven code quality analysis for production-ready development",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "publisher": "codegates",
   "repository": {
     "type": "git",
     "url": "https://github.com/yourusername/codegates"
   },
   "engines": {
-    "vscode": "^1.80.0"
+    "vscode": "^1.80.0",
+    "node": ">=16.0.0"
   },
   "categories": [
     "Linters",
@@ -65,16 +66,36 @@
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run clean && npm run compile",
     "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./"
+    "watch": "tsc -watch -p ./",
+    "clean": "rm -rf out",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package"
   },
   "devDependencies": {
     "@types/vscode": "^1.80.0",
-    "@types/node": "^18.0.0",
-    "typescript": "^5.0.0"
+    "@types/node": "16.x",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.2.0",
+    "@vscode/test-electron": "^2.3.0",
+    "@vscode/vsce": "^2.19.0"
   },
   "dependencies": {
-    "axios": "^1.6.0"
+    "axios": "^0.27.2"
+  },
+  "resolutions": {
+    "minimatch": "^5.0.0",
+    "glob": "^8.0.0",
+    "brace-expansion": "^1.1.11"
+  },
+  "overrides": {
+    "minimatch": "^5.0.0",
+    "glob": "^8.0.0",
+    "brace-expansion": "^1.1.11"
   }
 } 
