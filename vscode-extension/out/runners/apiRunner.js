@@ -48,10 +48,17 @@ class ApiRunner {
         this.pollingInterval = null;
         this.configManager = configManager;
         this.notificationManager = notificationManager;
+        // Log current configuration on startup
+        const currentConfig = this.getApiConfig();
+        console.log('ApiRunner initialized with config:', currentConfig);
         // Listen for configuration changes
         vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('codegates.api')) {
-                // Configuration changed - no client to recreate since we're using built-in HTTP
+            if (e.affectsConfiguration('codegates.apiUrl') ||
+                e.affectsConfiguration('codegates.apiTimeout') ||
+                e.affectsConfiguration('codegates.apiRetries')) {
+                console.log('CodeGates API configuration changed, reloading...');
+                const newConfig = this.getApiConfig();
+                console.log('New API configuration:', newConfig);
             }
         });
     }
@@ -112,10 +119,10 @@ class ApiRunner {
     }
     getApiConfig() {
         return {
-            baseUrl: this.configManager.get('api.baseUrl', 'http://localhost:8000/api/v1'),
-            apiKey: this.configManager.get('api.apiKey', ''),
-            timeout: this.configManager.get('api.timeout', 300),
-            retries: this.configManager.get('api.retries', 3)
+            baseUrl: this.configManager.get('apiUrl', 'http://localhost:8000/api/v1'),
+            apiKey: this.configManager.get('apiKey', ''),
+            timeout: this.configManager.get('apiTimeout', 300),
+            retries: this.configManager.get('apiRetries', 3)
         };
     }
     async testConnection() {

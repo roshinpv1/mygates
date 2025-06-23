@@ -268,7 +268,30 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.commands.executeCommand('workbench.action.openSettings', 'codegates');
     });
 
-    context.subscriptions.push(scanDisposable, configureDisposable);
+    // Add debug command to test configuration
+    let debugConfigDisposable = vscode.commands.registerCommand('codegates.debugConfig', () => {
+        const configManager = new ConfigurationManager();
+        const config = configManager.getAll();
+        
+        const message = `CodeGates Configuration:
+API URL: ${config.apiUrl}
+API Timeout: ${config.apiTimeout}
+API Retries: ${config.apiRetries}
+
+Settings inspection:
+${JSON.stringify(config, null, 2)}`;
+        
+        vscode.window.showInformationMessage('Configuration details logged to console');
+        console.log(message);
+        
+        // Also show in output channel
+        const outputChannel = vscode.window.createOutputChannel('CodeGates Config');
+        outputChannel.clear();
+        outputChannel.appendLine(message);
+        outputChannel.show();
+    });
+
+    context.subscriptions.push(scanDisposable, configureDisposable, debugConfigDisposable);
 }
 
 export function deactivate() {} 

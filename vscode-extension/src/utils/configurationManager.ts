@@ -26,27 +26,15 @@ export class ConfigurationManager {
     getAll(): { [key: string]: any } {
         const config = vscode.workspace.getConfiguration(ConfigurationManager.CONFIGURATION_SECTION);
         return {
-            enabled: config.get('enabled'),
-            autoScan: config.get('autoScan'),
-            scanOnOpen: config.get('scanOnOpen'),
-            threshold: config.get('threshold'),
-            languages: config.get('languages'),
-            excludePatterns: config.get('excludePatterns'),
-            llm: {
-                enabled: config.get('llm.enabled'),
-                provider: config.get('llm.provider'),
-                model: config.get('llm.model'),
-                temperature: config.get('llm.temperature')
-            },
-            reports: {
-                format: config.get('reports.format'),
-                autoOpen: config.get('reports.autoOpen')
-            },
-            notifications: {
-                level: config.get('notifications.level')
-            },
-            pythonPath: config.get('pythonPath'),
-            codegatePath: config.get('codegatePath')
+            // API Configuration (matches package.json settings)
+            apiUrl: config.get('apiUrl'),
+            apiTimeout: config.get('apiTimeout'),
+            apiRetries: config.get('apiRetries'),
+            
+            // Debug information
+            _inspectApiUrl: config.inspect('apiUrl'),
+            _inspectApiTimeout: config.inspect('apiTimeout'),
+            _inspectApiRetries: config.inspect('apiRetries')
         };
     }
 

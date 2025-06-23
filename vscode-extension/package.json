@@ -42,6 +42,12 @@
         "title": "CodeGates: Configure API",
         "category": "CodeGates",
         "icon": "$(settings-gear)"
+      },
+      {
+        "command": "codegates.debugConfig",
+        "title": "CodeGates: Debug Configuration",
+        "category": "CodeGates",
+        "icon": "$(info)"
       }
     ],
     "menus": {
@@ -51,6 +57,9 @@
         },
         {
           "command": "codegates.configure"
+        },
+        {
+          "command": "codegates.debugConfig"
         }
       ]
     },

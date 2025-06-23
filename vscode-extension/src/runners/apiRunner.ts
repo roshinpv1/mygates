@@ -32,10 +32,18 @@ export class ApiRunner implements ICodeGatesRunner {
         this.configManager = configManager;
         this.notificationManager = notificationManager;
         
+        // Log current configuration on startup
+        const currentConfig = this.getApiConfig();
+        console.log('ApiRunner initialized with config:', currentConfig);
+        
         // Listen for configuration changes
         vscode.workspace.onDidChangeConfiguration(e => {
-            if (e.affectsConfiguration('codegates.api')) {
-                // Configuration changed - no client to recreate since we're using built-in HTTP
+            if (e.affectsConfiguration('codegates.apiUrl') || 
+                e.affectsConfiguration('codegates.apiTimeout') || 
+                e.affectsConfiguration('codegates.apiRetries')) {
+                console.log('CodeGates API configuration changed, reloading...');
+                const newConfig = this.getApiConfig();
+                console.log('New API configuration:', newConfig);
             }
         });
     }
@@ -108,10 +116,10 @@ export class ApiRunner implements ICodeGatesRunner {
 
     private getApiConfig(): ApiConfig {
         return {
-            baseUrl: this.configManager.get<string>('api.baseUrl', 'http://localhost:8000/api/v1'),
-            apiKey: this.configManager.get<string>('api.apiKey', ''),
-            timeout: this.configManager.get<number>('api.timeout', 300),
-            retries: this.configManager.get<number>('api.retries', 3)
+            baseUrl: this.configManager.get<string>('apiUrl', 'http://localhost:8000/api/v1'),
+            apiKey: this.configManager.get<string>('apiKey', ''),
+            timeout: this.configManager.get<number>('apiTimeout', 300),
+            retries: this.configManager.get<number>('apiRetries', 3)
         };
     }
 
