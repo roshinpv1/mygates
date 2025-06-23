@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Body, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import uvicorn
@@ -57,10 +58,74 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# Configure CORS for the main app
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "vscode-webview://*",  # VS Code Extension
+        "http://localhost:*",   # Local development
+        "http://127.0.0.1:*",  # Local development
+        "https://localhost:*",  # HTTPS local development
+        "https://127.0.0.1:*", # HTTPS local development
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "User-Agent",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
+    expose_headers=[
+        "Content-Type",
+        "Content-Length",
+        "Date",
+        "Server",
+    ]
+)
+
 # Create a sub-application for /api/v1 routes
 api_v1 = FastAPI(
     title="MyGates API v1",
     description="API v1 routes for MyGates",
+)
+
+# Configure CORS for the v1 sub-application
+api_v1.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "vscode-webview://*",  # VS Code Extension
+        "http://localhost:*",   # Local development
+        "http://127.0.0.1:*",  # Local development
+        "https://localhost:*",  # HTTPS local development
+        "https://127.0.0.1:*", # HTTPS local development
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language", 
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "User-Agent",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
+    expose_headers=[
+        "Content-Type",
+        "Content-Length",
+        "Date",
+        "Server",
+    ]
 )
 
 # In-memory storage for scan results (in production, use a database)
@@ -641,10 +706,15 @@ async def perform_scan(scan_id: str, request: ScanRequest):
             "completed_at": datetime.now().isoformat()
         })
 
+@api_v1.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle CORS preflight requests for all routes"""
+    return {"message": "OK"}
+
 @api_v1.get("/health")
 async def health_check():
     """Check API health status."""
-    return {"status": "healthy"}
+    return {"status": "healthy", "cors_enabled": True}
 
 @api_v1.post("/scan", response_model=ScanResult)
 async def scan_repository(request: ScanRequest, background_tasks: BackgroundTasks):
