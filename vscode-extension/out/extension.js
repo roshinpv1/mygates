@@ -200,8 +200,8 @@ class CodeGatesScanPanel {
                     <div class="scan-form">
                         <div class="form-group">
                             <label for="repositoryUrl">GitHub Repository URL</label>
-                            <input type="text" id="repositoryUrl" placeholder="https://github.com/owner/repo">
-                            <small>Enter the full GitHub repository URL</small>
+                            <input type="text" id="repositoryUrl" placeholder="https://github.com/owner/repo or https://github.enterprise.com/owner/repo">
+                            <small>Enter the full GitHub repository URL (supports github.com and GitHub Enterprise)</small>
                         </div>
                         <div class="form-group">
                             <label for="branch">Branch (defaults to main)</label>

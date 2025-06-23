@@ -420,13 +420,24 @@ function startScan() {
         return;
     }
 
-    // Validate GitHub URL format
+    // Validate GitHub URL format (support both github.com and GitHub Enterprise)
     try {
         const url = new URL(repositoryUrl);
-        if (!url.hostname.includes('github.com')) {
-            showStatus('Please enter a valid GitHub repository URL', 'error');
+        const hostname = url.hostname.toLowerCase();
+        
+        // Check if hostname contains 'github' (for both github.com and GitHub Enterprise like github.company.com)
+        if (!hostname.includes('github')) {
+            showStatus('Please enter a valid GitHub repository URL (github.com or GitHub Enterprise)', 'error');
             return;
         }
+        
+        // Check if path has owner/repo format
+        const pathParts = url.pathname.replace(/^\/+|\/+$/g, '').split('/');
+        if (pathParts.length < 2 || !pathParts[0] || !pathParts[1]) {
+            showStatus('Please enter a valid repository URL format: https://github.example.com/owner/repo', 'error');
+            return;
+        }
+        
     } catch (e) {
         showStatus('Please enter a valid repository URL', 'error');
         return;
