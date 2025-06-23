@@ -1,0 +1,80 @@
+{
+  "name": "codegates",
+  "displayName": "CodeGates - Hard Gate Validator",
+  "description": "API-driven code quality analysis for production-ready development",
+  "version": "2.0.0",
+  "publisher": "codegates",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/codegates"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters",
+    "Testing",
+    "Other"
+  ],
+  "keywords": [
+    "code quality",
+    "hard gates",
+    "validation",
+    "security",
+    "api",
+    "remote analysis"
+  ],
+  "activationEvents": [
+    "onCommand:codegates.scan"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codegates.scan",
+        "title": "CodeGates: Scan",
+        "category": "CodeGates",
+        "icon": "$(search)"
+      },
+      {
+        "command": "codegates.configure",
+        "title": "CodeGates: Configure API",
+        "category": "CodeGates",
+        "icon": "$(settings-gear)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "codegates.scan"
+        },
+        {
+          "command": "codegates.configure"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeGates",
+      "properties": {
+        "codegates.apiUrl": {
+          "type": "string",
+          "default": "http://localhost:8000/api/v1",
+          "description": "CodeGates API server URL"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+} 
