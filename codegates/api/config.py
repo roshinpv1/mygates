@@ -46,7 +46,16 @@ class BaseConfig:
     
     # File upload settings
     MAX_CONTENT_LENGTH = 100 * 1024 * 1024  # 100MB
-    UPLOAD_FOLDER = os.environ.get('UPLOAD_FOLDER') or '/tmp/codegates-uploads'
+    
+    # Container-friendly upload directory with fallbacks
+    _upload_fallbacks = [
+        os.environ.get('UPLOAD_FOLDER'),
+        '/app/uploads',       # Common container path
+        './uploads',          # Local fallback
+        '/tmp/codegates-uploads'  # Traditional fallback
+    ]
+    UPLOAD_FOLDER = next((path for path in _upload_fallbacks if path), './uploads')
+    
     ALLOWED_EXTENSIONS = {'.py', '.java', '.js', '.ts', '.cs', '.zip', '.tar.gz'}
     
     # Celery settings (for background tasks)
@@ -100,9 +109,18 @@ class BaseConfig:
     LOG_FORMAT = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     LOG_FILE = os.environ.get('LOG_FILE')
     
-    # Git settings
+    # Git settings - container-friendly temporary directories
     GIT_TIMEOUT = int(os.environ.get('GIT_TIMEOUT', '300'))  # 5 minutes
-    TEMP_REPO_DIR = os.environ.get('TEMP_REPO_DIR') or '/tmp/codegates-repos'
+    
+    # Try multiple temp directory options for container compatibility
+    _temp_repo_options = [
+        os.environ.get('TEMP_REPO_DIR'),
+        '/app/temp',              # Container app temp
+        './temp',                 # Local relative temp
+        '/tmp/codegates-repos'    # Traditional temp
+    ]
+    TEMP_REPO_DIR = next((path for path in _temp_repo_options if path), './temp')
+    
     GITHUB_TOKEN = os.environ.get('GITHUB_TOKEN')
     
     # API settings

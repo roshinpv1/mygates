@@ -392,9 +392,79 @@ class ScanResult(BaseModel):
     report_url: Optional[str] = Field(None, description="URL to detailed report")
     jira_result: Optional[Dict[str, Any]] = Field(None, description="JIRA integration result")
 
+def ensure_writable_directory(path: str, description: str = "directory") -> str:
+    """Ensure directory exists and is writable, with container-friendly fallbacks"""
+    
+    # List of fallback options
+    fallback_options = [
+        path,
+        f"./app/{Path(path).name}",  # App-relative path
+        f"./{Path(path).name}",      # Current dir relative
+        f"./temp/{Path(path).name}"  # Temp subdirectory
+    ]
+    
+    for option in fallback_options:
+        if not option:
+            continue
+            
+        try:
+            # Create directory if it doesn't exist
+            os.makedirs(option, exist_ok=True)
+            
+            # Test write permissions
+            test_file = os.path.join(option, f'.write_test_{os.getpid()}')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            
+            print(f"✅ Using {description}: {option}")
+            return option
+            
+        except (OSError, PermissionError) as e:
+            print(f"⚠️ Cannot use {option} for {description}: {e}")
+            continue
+    
+    # If all options failed, raise an error
+    raise Exception(f"No writable {description} found. Please set appropriate environment variables or ensure container has write permissions.")
+
 def clone_repository(repo_url: str, branch: str, token: Optional[str] = None) -> str:
-    """Clone repository to temporary directory"""
-    temp_dir = tempfile.mkdtemp(prefix="mygates_")
+    """Clone repository to temporary directory with OCP container support"""
+    
+    # Try multiple temporary directory options for container compatibility
+    temp_base_options = [
+        os.environ.get('TEMP_REPO_DIR'),  # User-configured
+        os.environ.get('TMPDIR'),         # System temp (containers)
+        '/tmp',                           # Standard temp
+        './temp',                         # Local temp (fallback)
+        '.'                               # Current directory (last resort)
+    ]
+    
+    temp_dir = None
+    for temp_base in temp_base_options:
+        if not temp_base:
+            continue
+            
+        try:
+            # Ensure base directory exists and is writable
+            os.makedirs(temp_base, exist_ok=True)
+            
+            # Test write permissions
+            test_file = os.path.join(temp_base, f'.write_test_{os.getpid()}')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            
+            # Create unique temporary directory
+            temp_dir = tempfile.mkdtemp(prefix="mygates_", dir=temp_base)
+            print(f"📁 Using temporary directory: {temp_dir}")
+            break
+            
+        except (OSError, PermissionError) as e:
+            print(f"⚠️ Cannot use {temp_base}: {e}")
+            continue
+    
+    if not temp_dir:
+        raise Exception("No writable temporary directory found. Set TEMP_REPO_DIR environment variable to a writable path.")
     
     try:
         # Build clone URL
@@ -404,19 +474,38 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None) ->
         else:
             clone_url = f"https://{parsed_url.netloc}{parsed_url.path}.git"
         
-        # Clone repository
+        # Clone repository with enhanced error handling
         cmd = ["git", "clone", "-b", branch, "--depth", "1", clone_url, temp_dir]
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        print(f"🔄 Running: git clone -b {branch} --depth 1 [URL] {temp_dir}")
+        
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            timeout=300,
+            env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
+        )
         
         if result.returncode != 0:
-            raise Exception(f"Git clone failed: {result.stderr}")
+            error_msg = result.stderr.strip()
+            print(f"❌ Git clone failed: {error_msg}")
+            
+            # Enhanced error messages for containers
+            if 'permission denied' in error_msg.lower():
+                raise Exception(f"Permission denied during git clone. This might be due to container security constraints. Error: {error_msg}")
+            else:
+                raise Exception(f"Git clone failed: {error_msg}")
         
+        print(f"✅ Repository cloned successfully to {temp_dir}")
         return temp_dir
         
     except Exception as e:
         # Cleanup on failure
-        if os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception as cleanup_error:
+                print(f"⚠️ Failed to cleanup {temp_dir}: {cleanup_error}")
         raise e
 
 def analyze_repository(repo_path: str, threshold: int, repository_url: Optional[str] = None) -> Dict:
@@ -704,9 +793,9 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                         from codegates.reports import ReportGenerator
                         from codegates.models import ReportConfig
                         
-                        # Create reports directory if it doesn't exist
-                        reports_dir = Path("reports")
-                        reports_dir.mkdir(exist_ok=True)
+                        # Create reports directory with container-friendly fallbacks
+                        reports_dir_path = ensure_writable_directory("reports", "reports directory")
+                        reports_dir = Path(reports_dir_path)
                         
                         # Generate and save report to file
                         report_filename = f"hard_gate_report_{scan_id}.html"
@@ -969,9 +1058,9 @@ async def get_html_report(scan_id: str):
             from codegates.reports import ReportGenerator
             from codegates.models import ReportConfig
             
-            # Create reports directory if it doesn't exist
-            reports_dir = Path("reports")
-            reports_dir.mkdir(exist_ok=True)
+            # Create reports directory with container-friendly fallbacks
+            reports_dir_path = ensure_writable_directory("reports", "reports directory")
+            reports_dir = Path(reports_dir_path)
             
             # Generate and save report to file
             report_filename = f"hard_gate_report_{scan_id}.html"
@@ -1043,8 +1132,8 @@ async def get_html_report(scan_id: str):
             """
             
             # Save basic report to file as well
-            reports_dir = Path("reports")
-            reports_dir.mkdir(exist_ok=True)
+            reports_dir_path = ensure_writable_directory("reports", "reports directory")
+            reports_dir = Path(reports_dir_path)
             report_filename = f"hard_gate_report_{scan_id}.html"
             report_path = reports_dir / report_filename
             
