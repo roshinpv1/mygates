@@ -68,7 +68,7 @@ try:
     API_BASE_URL = api_config['base_url'] or f"http://localhost:{API_PORT}"
     
     # DEBUG: Ensure API_BASE_URL has correct format
-    if API_BASE_URL and not ':' in API_BASE_URL.replace('://', ''):
+    if API_BASE_URL and not ':' in API_BASE_URL.replace('://', '').split('/')[0]:
         # If API_BASE_URL doesn't have a port, add the default port
         if API_BASE_URL.endswith('/'):
             API_BASE_URL = API_BASE_URL.rstrip('/')
