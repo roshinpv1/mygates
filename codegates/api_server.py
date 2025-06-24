@@ -9,6 +9,7 @@ Supports development, production, and testing environments.
 import os
 import sys
 import logging
+import secrets
 from pathlib import Path
 
 # Add the parent directory to the Python path to import codegates
@@ -24,9 +25,15 @@ def setup_environment():
     if 'FLASK_ENV' not in os.environ:
         os.environ['FLASK_ENV'] = 'development'
     
-    # Set default secret key for development
-    if 'SECRET_KEY' not in os.environ and os.environ.get('FLASK_ENV') == 'development':
-        os.environ['SECRET_KEY'] = 'dev-secret-key-change-in-production'
+    # Generate secure secret key if not provided
+    if 'SECRET_KEY' not in os.environ:
+        secure_key = secrets.token_urlsafe(32)
+        os.environ['SECRET_KEY'] = secure_key
+        env = os.environ.get('FLASK_ENV', 'development')
+        if env == 'development':
+            print("🔐 Generated secure SECRET_KEY for development")
+        else:
+            print("⚠️ No SECRET_KEY provided - generated secure random key")
     
     # Set default database URL if not specified
     if 'DATABASE_URL' not in os.environ:

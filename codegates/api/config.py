@@ -7,6 +7,7 @@ Supports development, production, and testing environments.
 
 import os
 from datetime import timedelta
+import secrets
 
 
 class BaseConfig:
@@ -15,7 +16,10 @@ class BaseConfig:
     # Application settings
     APP_NAME = 'CodeGates API'
     VERSION = '1.0.0'
-    SECRET_KEY = os.environ.get('SECRET_KEY') or 'dev-secret-key-change-in-production'
+    
+    # Generate a secure random secret key if not provided
+    _default_secret = secrets.token_urlsafe(32)
+    SECRET_KEY = os.environ.get('SECRET_KEY') or _default_secret
     
     # Database settings
     DATABASE_URL = os.environ.get('DATABASE_URL') or 'sqlite:///codegates.db'
@@ -154,10 +158,18 @@ class ProductionConfig(BaseConfig):
     DEBUG = False
     TESTING = False
     
-    # Strict security settings
-    SECRET_KEY = os.environ.get('SECRET_KEY')
-    if not SECRET_KEY:
-        raise ValueError("SECRET_KEY environment variable must be set in production")
+    # Warning if SECRET_KEY not provided in production
+    def __init__(self):
+        if not os.environ.get('SECRET_KEY'):
+            import warnings
+            warnings.warn(
+                "⚠️ SECRET_KEY environment variable not set in production. "
+                "Using auto-generated key. For session persistence across restarts, "
+                "set SECRET_KEY environment variable.",
+                RuntimeWarning,
+                stacklevel=2
+            )
+            print("⚠️ Production Warning: SECRET_KEY not set - using auto-generated key")
     
     # Database connection pooling
     SQLALCHEMY_ENGINE_OPTIONS = {
