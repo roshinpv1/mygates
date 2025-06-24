@@ -330,7 +330,11 @@ class GateValidator:
             if total_found == 0:
                 coverage = 100.0  # Perfect: no violations found
             else:
-                coverage = max(0.0, 100.0 - (total_found * 10))  # Penalty for violations
+                # Security-critical gates: ANY violation should result in failure
+                if gate_type == GateType.AVOID_LOGGING_SECRETS:
+                    coverage = 0.0  # Any secrets violation = complete failure
+                else:
+                    coverage = max(0.0, 100.0 - (total_found * 10))  # Penalty for violations
 
         avg_quality = sum(quality_scores) / len(quality_scores) if quality_scores else 0.0
         
@@ -383,7 +387,7 @@ class GateValidator:
             print(f"📊 Using pattern-based analysis for {gate_type.value}")
         
         # Determine status
-        status = self._determine_gate_status(final_score)
+        status = self._determine_gate_status(final_score, gate_type, total_found)
         
         return GateScore(
             gate=gate_type,
@@ -397,9 +401,14 @@ class GateValidator:
             recommendations=all_recommendations  # Don't use set() to avoid unhashable type error
         )
     
-    def _determine_gate_status(self, score: float) -> str:
-        """Determine gate status based on score"""
+    def _determine_gate_status(self, score: float, gate_type: GateType = None, found: int = 0) -> str:
+        """Determine gate status based on score with special handling for security gates"""
         
+        # Special handling for security-critical gates
+        if gate_type == GateType.AVOID_LOGGING_SECRETS and found > 0:
+            return "FAIL"  # Any secrets violation = immediate failure
+        
+        # Standard score-based evaluation
         if score >= 80:
             return "PASS"
         elif score >= 60:

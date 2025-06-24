@@ -61,14 +61,45 @@ class SharedReportGenerator:
     
     @staticmethod
     def calculate_summary_stats(result_data: Dict[str, Any]) -> Dict[str, int]:
-        """Calculate summary statistics - exact same logic as VS Code extension"""
+        """Calculate summary statistics - with logical consistency fix for violations"""
         gates = result_data.get("gates", [])
+        
+        # Count gates with logical consistency fixes
+        implemented_gates = 0
+        partial_gates = 0
+        not_implemented_gates = 0
+        not_applicable_gates = 0
+        
+        for gate in gates:
+            status = gate.get("status")
+            found = gate.get("found", 0)
+            
+            # Apply logical consistency fixes
+            if found > 0 and gate.get("name") == 'avoid_logging_secrets':
+                # Secrets violations should be counted as not implemented
+                not_implemented_gates += 1
+            elif found > 0 and status == 'PASS':
+                # Other gates with violations but PASS status should be partial
+                partial_gates += 1
+            elif status == 'PASS':
+                implemented_gates += 1
+            elif status == 'WARNING':
+                partial_gates += 1
+            elif status in ['FAIL', 'FAILED']:
+                not_implemented_gates += 1
+            elif status == 'NOT_APPLICABLE':
+                not_applicable_gates += 1
+            else:
+                # Default fallback
+                not_implemented_gates += 1
+        
         return {
             "total_gates": len(gates),
-            "implemented_gates": len([g for g in gates if g.get("status") == 'PASS']),
-            "partial_gates": len([g for g in gates if g.get("status") == 'WARNING']),
-            "not_implemented_gates": len([g for g in gates if g.get("status") == 'FAIL']),
-            "not_applicable_gates": len([g for g in gates if g.get("status") == 'NOT_APPLICABLE'])
+            "implemented_gates": implemented_gates,
+            "partial_gates": partial_gates,
+            "not_implemented_gates": not_implemented_gates,
+            # Note: VS Code extension calculates but doesn't display notApplicableGates
+            "not_applicable_gates": not_applicable_gates
         }
     
     @staticmethod
@@ -100,20 +131,21 @@ class SharedReportGenerator:
     
     @staticmethod
     def analyze_secrets(result_data: Dict[str, Any]) -> Dict[str, str]:
-        """Analyze secrets - exact same logic as VS Code extension"""
+        """Analyze secrets - with logical consistency fix for violations"""
         gates = result_data.get("gates", [])
         secrets_gate = next((g for g in gates if g.get("name") == 'avoid_logging_secrets'), None)
         
         if secrets_gate:
-            if secrets_gate.get("status") == 'PASS':
-                return {
-                    'status': 'safe',
-                    'message': 'No secrets or confidential data detected'
-                }
-            elif secrets_gate.get("found", 0) > 0:
+            # Prioritize violations over status for logical consistency
+            if secrets_gate.get("found", 0) > 0:
                 return {
                     'status': 'warning',
                     'message': f'Found {secrets_gate["found"]} potential confidential data logging violations'
+                }
+            elif secrets_gate.get("status") == 'PASS':
+                return {
+                    'status': 'safe',
+                    'message': 'No secrets or confidential data detected'
                 }
         
         return {
@@ -125,7 +157,7 @@ class SharedReportGenerator:
     def get_gate_categories() -> Dict[str, List[str]]:
         """Get gate categories - exact same as VS Code extension"""
         return {
-            'Auditability': ['structured_logs', 'avoid_logging_secrets', 'audit_trail', 'correlation_id', 'api_logs', 'background_jobs', 'ui_errors'],
+            'Auditability': ['structured_logs', 'avoid_logging_secrets', 'audit_trail', 'correlation_id', 'log_api_calls', 'log_background_jobs', 'ui_errors'],
             'Availability': ['retry_logic', 'timeouts', 'throttling', 'circuit_breakers'],
             'Error Handling': ['error_logs', 'http_codes', 'ui_error_tools'],
             'Testing': ['automated_tests']
@@ -139,8 +171,8 @@ class SharedReportGenerator:
             'avoid_logging_secrets': 'Avoid Logging Confidential Data',
             'audit_trail': 'Create Audit Trail Logs',
             'correlation_id': 'Tracking ID For Log Messages',
-            'api_logs': 'Log Rest API Calls',
-            'background_jobs': 'Log Application Messages',
+            'log_api_calls': 'Log Rest API Calls',
+            'log_background_jobs': 'Log Application Messages',
             'ui_errors': 'Client UI Errors Logged',
             'retry_logic': 'Retry Logic',
             'timeouts': 'Set Timeouts IO Operations',
@@ -153,14 +185,34 @@ class SharedReportGenerator:
         }
     
     @staticmethod
+    def get_gate_comment(gate_name: str, comments: Dict[str, str] = None) -> str:
+        """Get comment for a gate from comments dictionary"""
+        if not comments:
+            return ""
+        return comments.get(gate_name, "")
+    
+    @staticmethod
     def format_gate_name(name: str) -> str:
         """Format gate name - exact same logic as VS Code extension"""
         gate_name_map = SharedReportGenerator.get_gate_name_map()
-        return gate_name_map.get(name, name.split('_').map(lambda word: word.capitalize()).join(' '))
+        if name in gate_name_map:
+            return gate_name_map[name]
+        # Fallback formatting - fix the .map() error
+        return ' '.join(word.capitalize() for word in name.split('_'))
     
     @staticmethod
-    def get_status_info(status: str) -> Dict[str, str]:
-        """Get status info - exact same logic as VS Code extension"""
+    def get_status_info(status: str, gate: Dict[str, Any] = None) -> Dict[str, str]:
+        """Get status info - with logical consistency fix for violations"""
+        # Fix logical inconsistency: if there are violations, show as warning/fail regardless of status
+        if gate and gate.get("found", 0) > 0:
+            # Special handling for avoid_logging_secrets gate - violations should override PASS status
+            if gate.get("name") == 'avoid_logging_secrets':
+                return {'class': 'not-implemented', 'text': '✗ Violations Found'}
+            # For other gates, violations indicate partial implementation
+            elif status == 'PASS':
+                return {'class': 'partial', 'text': '⚬ Has Issues'}
+        
+        # Default status mapping
         if status == 'PASS':
             return {'class': 'implemented', 'text': '✓ Implemented'}
         elif status == 'WARNING':
@@ -228,9 +280,17 @@ class SharedReportGenerator:
     
     @staticmethod
     def get_recommendation(gate: Dict[str, Any], gate_name: str) -> str:
-        """Get recommendation - exact same logic as VS Code extension"""
+        """Get recommendation - with logical consistency fix for violations"""
         status = gate.get("status")
         
+        # Fix logical inconsistency: if there are violations, recommend fixing them
+        if gate.get("found", 0) > 0:
+            if gate.get("name") == 'avoid_logging_secrets':
+                return f"Fix confidential data logging violations in {gate_name.lower()}"
+            elif status == 'PASS':
+                return f"Address identified issues in {gate_name.lower()}"
+        
+        # Default recommendation mapping
         if status == 'PASS':
             return 'Continue maintaining good practices'
         elif status == 'WARNING':
@@ -278,7 +338,7 @@ class ReportGenerator:
         # Convert result to dict for JSON serialization
         report_data = {
             "project_name": result.project_name,
-            "project_path": result.project_path,
+            "project_path": getattr(result, 'project_path', ''),
             "language": result.language.value if hasattr(result, 'language') else 'unknown',
             "scan_date": result.timestamp.isoformat() if hasattr(result, 'timestamp') else datetime.now().isoformat(),
             "scan_duration": getattr(result, 'scan_duration', 0),
@@ -310,7 +370,7 @@ class ReportGenerator:
         
         return str(filepath)
     
-    def _generate_html_content(self, result: ValidationResult) -> str:
+    def _generate_html_content(self, result: ValidationResult, comments: Dict[str, str] = None) -> str:
         """Generate HTML content using exact same logic as VS Code extension"""
         
         # Transform result using shared logic
@@ -365,10 +425,6 @@ class ReportGenerator:
                 <div class="stat-number">{stats['not_implemented_gates']}</div>
                 <div class="stat-label">Not Met</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-number">{stats['not_applicable_gates']}</div>
-                <div class="stat-label">Not Applicable</div>
-            </div>
         </div>
         
         <h3>Overall Compliance</h3>
@@ -381,7 +437,7 @@ class ReportGenerator:
         
         {self._generate_secrets_section_html(secrets_analysis)}
         
-        {self._generate_gates_section_html(result_data)}
+        {self._generate_gates_section_html(result_data, comments)}
         
         <footer style="margin-top: 50px; text-align: center; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 20px;">
             <p>Hard Gate Assessment Report generated on {timestamp}</p>
@@ -606,8 +662,8 @@ class ReportGenerator:
             </p>
         </div>"""
     
-    def _generate_gates_section_html(self, result_data: Dict[str, Any]) -> str:
-        """Generate gates section HTML using shared logic"""
+    def _generate_gates_section_html(self, result_data: Dict[str, Any], comments: Dict[str, str] = None) -> str:
+        """Generate gates section HTML using shared logic with comments support"""
         gates = result_data.get("gates", [])
         gate_categories = SharedReportGenerator.get_gate_categories()
         
@@ -622,9 +678,10 @@ class ReportGenerator:
             rows = ""
             for gate in category_gates:
                 gate_name = SharedReportGenerator.format_gate_name(gate.get("name", ""))
-                status_info = SharedReportGenerator.get_status_info(gate.get("status", ""))
+                status_info = SharedReportGenerator.get_status_info(gate.get("status", ""), gate)
                 evidence = SharedReportGenerator.format_evidence(gate)
                 recommendation = SharedReportGenerator.get_recommendation(gate, gate_name)
+                comment = SharedReportGenerator.get_gate_comment(gate.get("name", ""), comments)
                 
                 rows += f"""
                         <tr>
@@ -632,6 +689,7 @@ class ReportGenerator:
                             <td><span class="status-{status_info['class']}">{status_info['text']}</span></td>
                             <td>{evidence}</td>
                             <td>{recommendation}</td>
+                            <td style="font-style: italic; color: #6b7280;">{comment if comment else 'No comments'}</td>
                         </tr>"""
             
             if rows:
@@ -645,6 +703,7 @@ class ReportGenerator:
                             <th>Status</th>
                             <th>Evidence</th>
                             <th>Recommendation</th>
+                            <th>Comments</th>
                         </tr>
                     </thead>
                     <tbody>{rows}

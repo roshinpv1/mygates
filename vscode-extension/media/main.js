@@ -1,6 +1,46 @@
 const vscode = acquireVsCodeApi();
 let currentTab = 'local';
 
+// Global storage for gate comments
+let gateComments = {};
+
+// Load comments from storage
+function loadComments() {
+    const stored = localStorage.getItem('codegates-comments');
+    if (stored) {
+        try {
+            gateComments = JSON.parse(stored);
+        } catch (e) {
+            gateComments = {};
+        }
+    }
+}
+
+// Save comments to storage
+function saveComments() {
+    localStorage.setItem('codegates-comments', JSON.stringify(gateComments));
+}
+
+// Get comment for a gate
+function getGateComment(gateName) {
+    return gateComments[gateName] || '';
+}
+
+// Set comment for a gate
+function setGateComment(gateName, comment) {
+    if (comment.trim()) {
+        gateComments[gateName] = comment.trim();
+    } else {
+        delete gateComments[gateName];
+    }
+    saveComments();
+}
+
+// Initialize comments on page load
+document.addEventListener('DOMContentLoaded', function() {
+    loadComments();
+});
+
 // Handle messages from the extension
 window.addEventListener('message', event => {
     const message = event.data;
@@ -99,12 +139,12 @@ function showResults(result) {
     };
     
     if (secretsGate) {
-        if (secretsGate.status === 'PASS') {
+        /*if (secretsGate.status === 'PASS') {
             secretsAnalysis = {
                 status: 'safe',
                 message: 'No secrets or confidential data detected'
             };
-        } else if (secretsGate.found && secretsGate.found > 0) {
+        }*/ if (secretsGate.found && secretsGate.found > 0) {
             secretsAnalysis = {
                 status: 'warning',
                 message: `Found ${secretsGate.found} potential confidential data logging violations`
@@ -249,6 +289,7 @@ function showResults(result) {
                             <th>Status</th>
                             <th>Evidence</th>
                             <th>Recommendation</th>
+                            <th>Comments</th>
                         </tr>
                     </thead>
                     <tbody>`;
@@ -258,6 +299,7 @@ function showResults(result) {
             const statusInfo = getStatusInfo(gate.status);
             const evidence = formatEvidence(gate);
             const recommendation = getRecommendation(gate, gateName);
+            const currentComment = getGateComment(gate.name);
             
             html += `
                         <tr>
@@ -265,6 +307,15 @@ function showResults(result) {
                             <td><span class="status-${statusInfo.class}">${statusInfo.text}</span></td>
                             <td>${evidence}</td>
                             <td>${recommendation}</td>
+                            <td>
+                                <textarea 
+                                    class="comment-input" 
+                                    data-gate="${gate.name}"
+                                    placeholder="Add your comments..."
+                                    rows="2"
+                                    style="width: 100%; resize: vertical; padding: 5px; border: 1px solid #ddd; border-radius: 3px; font-size: 12px;"
+                                >${currentComment}</textarea>
+                            </td>
                         </tr>`;
         });
         
@@ -282,9 +333,9 @@ function showResults(result) {
         html += `
             <div class="report-link">
                 <p>
-                    <a href="${result.report_url}" target="_blank" class="detailed-report-link">
+                    <button id="generateReportBtn" class="detailed-report-link" style="background: #2563eb; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; display: inline-block;">
                         📊 View Detailed HTML Report
-                    </a>
+                    </button>
                 </p>
             </div>`;
     }
@@ -297,6 +348,39 @@ function showResults(result) {
     </div>`;
 
     resultsEl.innerHTML = html;
+    
+    // Add event listeners for comment inputs
+    const commentInputs = resultsEl.querySelectorAll('.comment-input');
+    commentInputs.forEach(input => {
+        input.addEventListener('blur', function() {
+            const gateName = this.getAttribute('data-gate');
+            const comment = this.value;
+            setGateComment(gateName, comment);
+        });
+        
+        // Also save on Enter key
+        input.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.blur(); // Trigger the blur event to save
+            }
+        });
+    });
+    
+    // Add event listener for HTML report generation with comments
+    const generateReportBtn = resultsEl.querySelector('#generateReportBtn');
+    if (generateReportBtn) {
+        generateReportBtn.addEventListener('click', function() {
+            // Send comments along with scan result to generate HTML report
+            vscode.postMessage({
+                command: 'generateHtmlReport',
+                data: {
+                    result: result,
+                    comments: gateComments
+                }
+            });
+        });
+    }
 }
 
 function getStatusInfo(status) {
