@@ -216,6 +216,26 @@ class ConfigLoader:
             },
         }
     
+    def get_ssl_config(self) -> Dict[str, Any]:
+        """Get SSL/TLS configuration for GitHub Enterprise"""
+        return {
+            'verify_ssl': self.get_boolean('CODEGATES_SSL_VERIFY', True),
+            'ca_bundle': self.get('CODEGATES_SSL_CA_BUNDLE'),  # Path to custom CA bundle
+            'client_cert': self.get('CODEGATES_SSL_CLIENT_CERT'),  # Path to client certificate
+            'client_key': self.get('CODEGATES_SSL_CLIENT_KEY'),  # Path to client private key
+            'disable_warnings': self.get_boolean('CODEGATES_SSL_DISABLE_WARNINGS', False),
+            'ignore_self_signed': self.get_boolean('CODEGATES_SSL_IGNORE_SELF_SIGNED', False),  # For dev environments
+        }
+
+    def get_github_enterprise_config(self) -> Dict[str, Any]:
+        """Get GitHub Enterprise specific configuration"""
+        return {
+            'default_hostname': self.get('GITHUB_ENTERPRISE_HOSTNAME'),  # e.g., github.company.com
+            'api_version': self.get('GITHUB_ENTERPRISE_API_VERSION', 'v3'),
+            'connect_timeout': self.get_int('GITHUB_ENTERPRISE_CONNECT_TIMEOUT', 30),
+            'read_timeout': self.get_int('GITHUB_ENTERPRISE_READ_TIMEOUT', 120),
+        }
+    
     def get_all_config(self) -> Dict[str, Any]:
         """Get all configuration sections"""
         return {
@@ -225,6 +245,8 @@ class ConfigLoader:
             'vscode': self.get_vscode_config(),
             'reports': self.get_reports_config(),
             'llm': self.get_llm_config(),
+            'ssl': self.get_ssl_config(),
+            'github_enterprise': self.get_github_enterprise_config(),
         }
     
     def validate_config(self) -> List[str]:

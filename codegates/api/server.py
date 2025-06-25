@@ -23,6 +23,9 @@ import atexit
 import signal
 import weakref
 import time
+import ssl
+import urllib3
+from urllib3.exceptions import InsecureRequestWarning
 
 # Load environment variables first
 import sys
@@ -505,6 +508,10 @@ class ScanOptions(BaseModel):
         default=_DEFAULT_SCAN_OPTIONS['enable_api_fallback'],
         description="Enable automatic fallback to GitHub API if git clone fails. Recommended for robust operation."
     )
+    verify_ssl: Optional[bool] = Field(
+        default=None,
+        description="Override SSL certificate verification for this scan. None=use global config, True=force enable, False=force disable. Useful for GitHub Enterprise with self-signed certificates."
+    )
 
 class JiraOptions(BaseModel):
     enabled: bool = Field(
@@ -758,7 +765,7 @@ def ensure_writable_directory(path: str, description: str = "directory") -> str:
     # If all options failed, raise an error
     raise Exception(f"No writable {description} found. Please set appropriate environment variables or ensure container has write permissions.")
 
-def download_repository_via_api(repo_url: str, branch: str, token: Optional[str] = None) -> str:
+def download_repository_via_api(repo_url: str, branch: str, token: Optional[str] = None, verify_ssl: Optional[bool] = None) -> str:
     """Download repository using GitHub API as fallback when git clone fails"""
     
     try:
@@ -819,15 +826,43 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
         if not temp_dir:
             raise Exception("No writable temporary directory found for API download")
         
+        # Create SSL-configured session
+        session = get_requests_session(verify_ssl)
+        
         # Download repository archive via API
         archive_url = f"{api_base_url}/repos/{owner}/{repo}/zipball/{branch}"
         
-        headers = {'Accept': 'application/vnd.github.v3+json'}
+        # Configure headers
         if token:
-            headers['Authorization'] = f'token {token}'
+            session.headers.update({'Authorization': f'token {token}'})
         
         print(f"🔄 Downloading repository archive...")
-        response = requests.get(archive_url, headers=headers, timeout=120)
+        print(f"🔒 SSL verification: {'enabled' if session.verify else 'disabled'}")
+        
+        try:
+            response = session.get(archive_url, timeout=120)
+        except requests.exceptions.SSLError as ssl_error:
+            error_msg = str(ssl_error).lower()
+            
+            if 'certificate verify failed' in error_msg or 'ssl certificate' in error_msg:
+                # Provide helpful error message for SSL issues
+                if verify_ssl is None:  # Only suggest if not explicitly set
+                    raise Exception(
+                        f"SSL certificate verification failed for GitHub Enterprise server '{parsed_url.netloc}'. "
+                        f"To resolve this issue:\n"
+                        f"1. Set CODEGATES_SSL_VERIFY=false in your .env file to disable SSL verification\n"
+                        f"2. Or set CODEGATES_SSL_CA_BUNDLE=/path/to/your/ca-bundle.pem to use custom certificates\n"
+                        f"3. Or provide a GitHub token for authentication which may bypass some SSL issues\n"
+                        f"Original error: {ssl_error}"
+                    )
+                else:
+                    raise Exception(f"SSL certificate verification failed: {ssl_error}")
+            else:
+                raise Exception(f"SSL connection error: {ssl_error}")
+        except requests.exceptions.ConnectionError as conn_error:
+            raise Exception(f"Connection error to GitHub Enterprise server '{parsed_url.netloc}': {conn_error}")
+        except requests.exceptions.Timeout:
+            raise Exception(f"Timeout connecting to GitHub Enterprise server '{parsed_url.netloc}'. Check network connectivity.")
         
         if response.status_code == 200:
             print(f"✅ Repository archive downloaded successfully ({len(response.content)} bytes)")
@@ -867,16 +902,34 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
                 raise Exception(f"Failed to extract repository archive: {e}")
                 
         elif response.status_code == 401:
-            raise Exception("Authentication failed. Please check your GitHub token.")
+            raise Exception("Authentication failed. Please check your GitHub token and ensure it has 'repo' scope access.")
         elif response.status_code == 403:
-            raise Exception("Access forbidden. Token may lack required permissions.")
+            rate_limit_remaining = response.headers.get('X-RateLimit-Remaining', 'unknown')
+            if rate_limit_remaining == '0':
+                reset_time = response.headers.get('X-RateLimit-Reset', 'unknown')
+                raise Exception(f"GitHub API rate limit exceeded. Rate limit resets at {reset_time}. Consider using a GitHub token.")
+            else:
+                raise Exception("Access forbidden. Token may lack required permissions or repository may be private.")
         elif response.status_code == 404:
-            raise Exception(f"Repository or branch not found: {owner}/{repo}@{branch}")
+            raise Exception(f"Repository or branch not found: {owner}/{repo}@{branch}. Check the repository URL and branch name.")
+        elif response.status_code == 422:
+            raise Exception(f"Invalid branch name '{branch}' for repository {owner}/{repo}. Check if the branch exists.")
         else:
-            raise Exception(f"API download failed with status {response.status_code}: {response.text}")
+            try:
+                error_detail = response.json().get('message', response.text)
+            except:
+                error_detail = response.text
+            raise Exception(f"GitHub API request failed with status {response.status_code}: {error_detail}")
             
     except requests.RequestException as e:
-        raise Exception(f"Network error during API download: {e}")
+        if 'ssl' in str(e).lower() or 'certificate' in str(e).lower():
+            raise Exception(
+                f"SSL/Certificate error during API download from GitHub Enterprise. "
+                f"Consider setting CODEGATES_SSL_VERIFY=false or CODEGATES_SSL_CA_BUNDLE=/path/to/ca-bundle.pem. "
+                f"Error: {e}"
+            )
+        else:
+            raise Exception(f"Network error during API download: {e}")
     except Exception as e:
         # Cleanup on failure
         if temp_dir and os.path.exists(temp_dir):
@@ -890,7 +943,7 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
                     print(f"⚠️ Failed to cleanup API download directory {temp_dir}: {cleanup_error}")
         raise e
 
-def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, prefer_api: bool = False) -> str:
+def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, prefer_api: bool = False, verify_ssl: Optional[bool] = None) -> str:
     """
     Clone repository with Git fallback to GitHub API
     
@@ -899,6 +952,7 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
         branch: Branch to checkout
         token: GitHub token (optional)
         prefer_api: If True, try API first; if False, try git first
+        verify_ssl: SSL verification setting (None=use config, True=force enable, False=force disable)
     """
     
     git_error = None
@@ -907,13 +961,13 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
     # Determine order of methods to try
     if prefer_api:
         methods = [
-            ("GitHub API", download_repository_via_api),
+            ("GitHub API", lambda url, br, tok: download_repository_via_api(url, br, tok, verify_ssl)),
             ("Git Clone", _clone_repository_via_git)
         ]
     else:
         methods = [
             ("Git Clone", _clone_repository_via_git),
-            ("GitHub API", download_repository_via_api)
+            ("GitHub API", lambda url, br, tok: download_repository_via_api(url, br, tok, verify_ssl))
         ]
     
     for method_name, method_func in methods:
@@ -940,7 +994,26 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
     if api_error:
         error_details.append(f"API Download: {api_error}")
     
-    raise Exception(f"All repository checkout methods failed. Errors: {'; '.join(error_details)}")
+    # Check if both failed due to SSL issues and provide helpful guidance
+    ssl_related_errors = ['ssl', 'certificate', 'tls']
+    if any(ssl_term in str(error_details).lower() for ssl_term in ssl_related_errors):
+        ssl_help = (
+            f"\n\n🔒 SSL Certificate Issues Detected:\n"
+            f"Both git clone and API download failed with SSL-related errors. "
+            f"For GitHub Enterprise servers with self-signed certificates:\n\n"
+            f"1. Disable SSL verification (quick fix):\n"
+            f"   Add to your .env file: CODEGATES_SSL_VERIFY=false\n\n"
+            f"2. Use custom CA bundle (secure fix):\n"
+            f"   Add to your .env file: CODEGATES_SSL_CA_BUNDLE=/path/to/ca-bundle.pem\n\n"
+            f"3. Configure git globally:\n"
+            f"   git config --global http.sslVerify false\n\n"
+            f"4. Use authentication token (may help):\n"
+            f"   Provide a GitHub Enterprise token with 'repo' scope"
+        )
+        
+        raise Exception(f"All repository checkout methods failed due to SSL issues. {'; '.join(error_details)}{ssl_help}")
+    else:
+        raise Exception(f"All repository checkout methods failed. Errors: {'; '.join(error_details)}")
 
 def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] = None) -> str:
     """Original git clone implementation (extracted from clone_repository)"""
@@ -1306,7 +1379,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                 request.repository_url, 
                 request.branch, 
                 request.github_token,
-                prefer_api=prefer_api
+                prefer_api=prefer_api,
+                verify_ssl=scan_options.verify_ssl
             )
         else:
             # Use only git clone (legacy behavior)
@@ -1323,7 +1397,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                     repo_path = download_repository_via_api(
                         request.repository_url, 
                         request.branch, 
-                        request.github_token
+                        request.github_token,
+                        verify_ssl=scan_options.verify_ssl
                     )
                 else:
                     raise git_error
@@ -1956,6 +2031,104 @@ async def get_temp_directory_status():
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# SSL Configuration
+def get_ssl_config():
+    """Get SSL configuration from environment"""
+    try:
+        from codegates.utils.config_loader import get_config
+        config = get_config()
+        return config.get_ssl_config()
+    except Exception:
+        # Fallback to environment variables
+        return {
+            'verify_ssl': os.getenv('CODEGATES_SSL_VERIFY', 'true').lower() == 'true',
+            'ca_bundle': os.getenv('CODEGATES_SSL_CA_BUNDLE'),
+            'client_cert': os.getenv('CODEGATES_SSL_CLIENT_CERT'),
+            'client_key': os.getenv('CODEGATES_SSL_CLIENT_KEY'),
+            'disable_warnings': os.getenv('CODEGATES_SSL_DISABLE_WARNINGS', 'false').lower() == 'true'
+        }
+
+# Get SSL configuration at startup
+_SSL_CONFIG = get_ssl_config()
+
+# Configure SSL warnings
+if _SSL_CONFIG.get('disable_warnings', False):
+    urllib3.disable_warnings(InsecureRequestWarning)
+    print("⚠️ SSL certificate warnings disabled")
+
+def get_requests_session(verify_ssl: Optional[bool] = None) -> requests.Session:
+    """
+    Create a requests session with proper SSL configuration for GitHub Enterprise
+    
+    Args:
+        verify_ssl: Override SSL verification setting
+    """
+    session = requests.Session()
+    
+    # Determine SSL verification setting
+    if verify_ssl is not None:
+        ssl_verify = verify_ssl
+    else:
+        ssl_verify = _SSL_CONFIG.get('verify_ssl', True)
+    
+    # Configure SSL verification
+    if not ssl_verify:
+        session.verify = False
+        print("⚠️ SSL certificate verification disabled")
+    elif _SSL_CONFIG.get('ca_bundle'):
+        session.verify = _SSL_CONFIG['ca_bundle']
+        print(f"🔒 Using custom CA bundle: {_SSL_CONFIG['ca_bundle']}")
+    else:
+        session.verify = True
+    
+    # Configure client certificates (for mutual TLS)
+    if _SSL_CONFIG.get('client_cert') and _SSL_CONFIG.get('client_key'):
+        session.cert = (_SSL_CONFIG['client_cert'], _SSL_CONFIG['client_key'])
+        print(f"🔒 Using client certificate: {_SSL_CONFIG['client_cert']}")
+    elif _SSL_CONFIG.get('client_cert'):
+        session.cert = _SSL_CONFIG['client_cert']
+        print(f"🔒 Using client certificate: {_SSL_CONFIG['client_cert']}")
+    
+    # Set appropriate headers
+    session.headers.update({
+        'User-Agent': 'MyGates/1.0.0 (GitHub Enterprise Client)',
+        'Accept': 'application/vnd.github.v3+json'
+    })
+    
+    return session
+
+def configure_git_ssl_settings():
+    """Configure git SSL settings for GitHub Enterprise"""
+    try:
+        ssl_config = _SSL_CONFIG
+        
+        if not ssl_config.get('verify_ssl', True):
+            # Disable SSL verification for git
+            print("🔧 Configuring git to skip SSL verification...")
+            os.environ['GIT_SSL_NO_VERIFY'] = '1'
+            
+            # Also set git config for the current session
+            subprocess.run(['git', 'config', '--global', 'http.sslVerify', 'false'], 
+                         capture_output=True, text=True)
+        else:
+            # Ensure SSL verification is enabled
+            os.environ.pop('GIT_SSL_NO_VERIFY', None)
+            
+            # Configure custom CA bundle if provided
+            if ssl_config.get('ca_bundle'):
+                os.environ['GIT_SSL_CAINFO'] = ssl_config['ca_bundle']
+                subprocess.run(['git', 'config', '--global', 'http.sslCAInfo', ssl_config['ca_bundle']], 
+                             capture_output=True, text=True)
+                print(f"🔒 Configured git to use CA bundle: {ssl_config['ca_bundle']}")
+        
+        print("✅ Git SSL configuration applied")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to configure git SSL settings: {e}")
+
+# Configure git SSL settings at startup
+configure_git_ssl_settings()
 
 # Mount the v1 API router
 app.mount("/api/v1", api_v1)
