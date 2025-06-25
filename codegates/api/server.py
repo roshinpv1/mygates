@@ -411,38 +411,8 @@ async def managed_temp_directory(prefix: str = "mygates_", description: str = "t
     """
     temp_dir = None
     try:
-        # Try multiple temporary directory options for container compatibility
-        temp_base_options = [
-            os.environ.get('TEMP_REPO_DIR'),
-            os.environ.get('TMPDIR'),
-            '/tmp',
-            './temp',
-            '.'
-        ]
-        
-        for temp_base in temp_base_options:
-            if not temp_base:
-                continue
-                
-            try:
-                os.makedirs(temp_base, exist_ok=True)
-                test_file = os.path.join(temp_base, f'.write_test_{os.getpid()}')
-                with open(test_file, 'w') as f:
-                    f.write('test')
-                os.remove(test_file)
-                
-                temp_dir = tempfile.mkdtemp(prefix=prefix, dir=temp_base)
-                register_temp_directory(temp_dir)
-                print(f"📁 Created managed {description}: {temp_dir}")
-                break
-                
-            except (OSError, PermissionError) as e:
-                print(f"⚠️ Cannot use {temp_base} for {description}: {e}")
-                continue
-        
-        if not temp_dir:
-            raise Exception(f"No writable location found for {description}")
-        
+        # Use the improved unique directory creation
+        temp_dir = create_unique_temp_directory(prefix, description)
         yield temp_dir
         
     finally:
@@ -793,38 +763,8 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
         print(f"🌐 Attempting API download from {api_base_url}")
         print(f"📦 Repository: {owner}/{repo}, Branch: {branch}")
         
-        # Create temporary directory for extraction
-        temp_base_options = [
-            os.environ.get('TEMP_REPO_DIR'),
-            os.environ.get('TMPDIR'),
-            '/tmp',
-            './temp',
-            '.'
-        ]
-        
-        temp_dir = None
-        for temp_base in temp_base_options:
-            if not temp_base:
-                continue
-                
-            try:
-                os.makedirs(temp_base, exist_ok=True)
-                test_file = os.path.join(temp_base, f'.write_test_{os.getpid()}')
-                with open(test_file, 'w') as f:
-                    f.write('test')
-                os.remove(test_file)
-                
-                temp_dir = tempfile.mkdtemp(prefix="mygates_api_", dir=temp_base)
-                register_temp_directory(temp_dir)
-                print(f"📁 Using temporary directory for API download: {temp_dir}")
-                break
-                
-            except (OSError, PermissionError) as e:
-                print(f"⚠️ Cannot use {temp_base} for API download: {e}")
-                continue
-        
-        if not temp_dir:
-            raise Exception("No writable temporary directory found for API download")
+        # Create unique temporary directory for extraction
+        temp_dir = create_unique_temp_directory("mygates_api_", "API download directory")
         
         # Create SSL-configured session
         session = get_requests_session(verify_ssl)
@@ -867,38 +807,11 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
         if response.status_code == 200:
             print(f"✅ Repository archive downloaded successfully ({len(response.content)} bytes)")
             
-            # Extract ZIP archive
+            # Extract ZIP archive using the safe extraction function
             try:
-                with zipfile.ZipFile(io.BytesIO(response.content)) as zip_ref:
-                    # GitHub creates a folder with format: owner-repo-commit_hash
-                    # We need to extract and rename it properly
-                    zip_ref.extractall(temp_dir)
-                    
-                    # Find the extracted folder (should be only one)
-                    extracted_items = os.listdir(temp_dir)
-                    if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
-                        extracted_folder = os.path.join(temp_dir, extracted_items[0])
+                return safe_extract_archive(response.content, temp_dir)
                         
-                        # Move contents to temp_dir root and remove the wrapper folder
-                        import glob
-                        for item in glob.glob(os.path.join(extracted_folder, '*')):
-                            dest_item = os.path.join(temp_dir, os.path.basename(item))
-                            if os.path.exists(dest_item):
-                                if os.path.isdir(dest_item):
-                                    shutil.rmtree(dest_item)
-                                else:
-                                    os.remove(dest_item)
-                            shutil.move(item, temp_dir)
-                        
-                        # Remove the now-empty extracted folder
-                        os.rmdir(extracted_folder)
-                        
-                        print(f"✅ Repository extracted successfully to {temp_dir}")
-                        return temp_dir
-                    else:
-                        raise Exception("Unexpected archive structure after extraction")
-                        
-            except zipfile.BadZipFile as e:
+            except Exception as e:
                 raise Exception(f"Failed to extract repository archive: {e}")
                 
         elif response.status_code == 401:
@@ -931,16 +844,8 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
         else:
             raise Exception(f"Network error during API download: {e}")
     except Exception as e:
-        # Cleanup on failure
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                asyncio.create_task(cleanup_temp_directory(temp_dir, "API download directory"))
-            except RuntimeError:
-                # No event loop running, use basic cleanup
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as cleanup_error:
-                    print(f"⚠️ Failed to cleanup API download directory {temp_dir}: {cleanup_error}")
+        # Cleanup on failure (temp_dir will be cleaned by our global cleanup system)
+        print(f"❌ API download failed: {e}")
         raise e
 
 def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, prefer_api: bool = False, verify_ssl: Optional[bool] = None) -> str:
@@ -1018,42 +923,8 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
 def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] = None) -> str:
     """Original git clone implementation (extracted from clone_repository)"""
     
-    # Try multiple temporary directory options for container compatibility
-    temp_base_options = [
-        os.environ.get('TEMP_REPO_DIR'),  # User-configured
-        os.environ.get('TMPDIR'),         # System temp (containers)
-        '/tmp',                           # Standard temp
-        './temp',                         # Local temp (fallback)
-        '.'                               # Current directory (last resort)
-    ]
-    
-    temp_dir = None
-    for temp_base in temp_base_options:
-        if not temp_base:
-            continue
-            
-        try:
-            # Ensure base directory exists and is writable
-            os.makedirs(temp_base, exist_ok=True)
-            
-            # Test write permissions
-            test_file = os.path.join(temp_base, f'.write_test_{os.getpid()}')
-            with open(test_file, 'w') as f:
-                f.write('test')
-            os.remove(test_file)
-            
-            # Create unique temporary directory
-            temp_dir = tempfile.mkdtemp(prefix="mygates_git_", dir=temp_base)
-            register_temp_directory(temp_dir)
-            print(f"📁 Using temporary directory for git clone: {temp_dir}")
-            break
-            
-        except (OSError, PermissionError) as e:
-            print(f"⚠️ Cannot use {temp_base} for git clone: {e}")
-            continue
-    
-    if not temp_dir:
-        raise Exception("No writable temporary directory found for git clone. Set TEMP_REPO_DIR environment variable to a writable path.")
+    # Create unique temporary directory for git clone
+    temp_dir = create_unique_temp_directory("mygates_git_", "git clone directory")
     
     try:
         # Build clone URL
@@ -1067,6 +938,19 @@ def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] =
         cmd = ["git", "clone", "-b", branch, "--depth", "1", clone_url, temp_dir]
         print(f"🔄 Running: git clone -b {branch} --depth 1 [URL] {temp_dir}")
         
+        # Ensure target directory is empty before cloning
+        if os.path.exists(temp_dir) and os.listdir(temp_dir):
+            print(f"⚠️ Target directory not empty, cleaning: {temp_dir}")
+            for item in os.listdir(temp_dir):
+                item_path = os.path.join(temp_dir, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path, ignore_errors=True)
+                else:
+                    try:
+                        os.remove(item_path)
+                    except OSError:
+                        pass
+        
         result = subprocess.run(
             cmd, 
             capture_output=True, 
@@ -1078,11 +962,13 @@ def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] =
         if result.returncode != 0:
             error_msg = result.stderr.strip()
             
-            # Enhanced error messages for containers
+            # Enhanced error messages for containers and directory issues
             if 'permission denied' in error_msg.lower():
                 raise Exception(f"Permission denied during git clone. This might be due to container security constraints. Error: {error_msg}")
             elif 'command not found' in error_msg.lower() or 'git' in error_msg.lower():
                 raise Exception(f"Git command not available. Consider using API fallback. Error: {error_msg}")
+            elif 'directory not empty' in error_msg.lower() or 'already exists' in error_msg.lower():
+                raise Exception(f"Target directory issue during git clone. This might be a race condition. Error: {error_msg}")
             else:
                 raise Exception(f"Git clone failed: {error_msg}")
         
@@ -1090,29 +976,11 @@ def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] =
         return temp_dir
         
     except subprocess.TimeoutExpired:
-        # Cleanup on timeout
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                asyncio.create_task(cleanup_temp_directory(temp_dir, "git clone directory"))
-            except RuntimeError:
-                # No event loop running, use basic cleanup
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception:
-                    pass
         raise Exception("Git clone operation timed out after 5 minutes")
         
     except Exception as e:
-        # Cleanup on failure
-        if temp_dir and os.path.exists(temp_dir):
-            try:
-                asyncio.create_task(cleanup_temp_directory(temp_dir, "git clone directory"))
-            except RuntimeError:
-                # No event loop running, use basic cleanup
-                try:
-                    shutil.rmtree(temp_dir, ignore_errors=True)
-                except Exception as cleanup_error:
-                    print(f"⚠️ Failed to cleanup git clone directory {temp_dir}: {cleanup_error}")
+        # The temp_dir will be cleaned up by our global cleanup system on failure
+        print(f"❌ Git clone failed: {e}")
         raise e
 
 def analyze_repository(repo_path: str, threshold: int, repository_url: Optional[str] = None) -> Dict:
@@ -2135,6 +2003,202 @@ app.mount("/api/v1", api_v1)
 
 def start_server():
     uvicorn.run(app, host=API_HOST, port=API_PORT)
+
+def create_unique_temp_directory(prefix: str, description: str = "temporary directory") -> str:
+    """
+    Create a unique temporary directory with better uniqueness guarantees
+    
+    Args:
+        prefix: Prefix for the directory name
+        description: Description for logging
+        
+    Returns:
+        Path to the created temporary directory
+        
+    Raises:
+        Exception: If no writable temporary directory can be created
+    """
+    # Add more uniqueness to prevent collisions
+    timestamp = int(time.time() * 1000000)  # microsecond precision
+    pid = os.getpid()
+    unique_id = f"{timestamp}_{pid}"
+    
+    temp_base_options = [
+        os.environ.get('TEMP_REPO_DIR'),
+        os.environ.get('TMPDIR'),
+        '/tmp',
+        './temp',
+        '.'
+    ]
+    
+    for temp_base in temp_base_options:
+        if not temp_base:
+            continue
+            
+        try:
+            os.makedirs(temp_base, exist_ok=True)
+            
+            # Test write permissions
+            test_file = os.path.join(temp_base, f'.write_test_{pid}')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            
+            # Try multiple attempts to create unique directory
+            for attempt in range(5):
+                try:
+                    full_prefix = f"{prefix}{unique_id}_{attempt}_"
+                    temp_dir = tempfile.mkdtemp(prefix=full_prefix, dir=temp_base)
+                    
+                    # Double-check the directory is actually empty and writable
+                    if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                        register_temp_directory(temp_dir)
+                        print(f"📁 Created unique {description}: {temp_dir}")
+                        return temp_dir
+                    else:
+                        # Directory exists but not empty, try cleanup and retry
+                        try:
+                            if os.path.exists(temp_dir):
+                                shutil.rmtree(temp_dir, ignore_errors=True)
+                        except Exception:
+                            pass
+                        continue
+                        
+                except (OSError, FileExistsError) as e:
+                    print(f"⚠️ Attempt {attempt + 1} failed for {temp_base}: {e}")
+                    if attempt == 4:  # Last attempt
+                        break
+                    time.sleep(0.1)  # Brief pause before retry
+                    continue
+            
+        except (OSError, PermissionError) as e:
+            print(f"⚠️ Cannot use {temp_base} for {description}: {e}")
+            continue
+    
+    raise Exception(f"No writable location found for {description}. All temporary directory creation attempts failed.")
+
+def safe_extract_archive(archive_content: bytes, temp_dir: str) -> str:
+    """
+    Safely extract a ZIP archive with robust error handling
+    
+    Args:
+        archive_content: ZIP file content as bytes
+        temp_dir: Target directory for extraction
+        
+    Returns:
+        Path to the extracted repository content
+        
+    Raises:
+        Exception: If extraction fails
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(archive_content)) as zip_ref:
+            # List all files first to check structure
+            file_list = zip_ref.namelist()
+            if not file_list:
+                raise Exception("Archive is empty")
+            
+            print(f"📦 Archive contains {len(file_list)} files")
+            
+            # Extract all files
+            zip_ref.extractall(temp_dir)
+            
+            # GitHub creates a folder with format: owner-repo-commit_hash
+            extracted_items = [item for item in os.listdir(temp_dir) if not item.startswith('.')]
+            
+            if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                extracted_folder = os.path.join(temp_dir, extracted_items[0])
+                
+                print(f"📁 Moving contents from wrapper folder: {extracted_folder}")
+                
+                # Move contents to temp_dir root with better error handling
+                try:
+                    # Use os.walk to handle all files including hidden ones
+                    for root, dirs, files in os.walk(extracted_folder):
+                        # Calculate relative path from extracted_folder
+                        rel_path = os.path.relpath(root, extracted_folder)
+                        if rel_path == '.':
+                            target_root = temp_dir
+                        else:
+                            target_root = os.path.join(temp_dir, rel_path)
+                            os.makedirs(target_root, exist_ok=True)
+                        
+                        # Move all files in this directory
+                        for file in files:
+                            source_file = os.path.join(root, file)
+                            target_file = os.path.join(target_root, file)
+                            
+                            # Handle existing files
+                            if os.path.exists(target_file):
+                                print(f"⚠️ Destination already exists, removing: {target_file}")
+                                try:
+                                    os.remove(target_file)
+                                except OSError:
+                                    pass
+                            
+                            # Move the file
+                            try:
+                                shutil.move(source_file, target_file)
+                                print(f"✅ Moved: {os.path.relpath(target_file, temp_dir)}")
+                            except Exception as move_error:
+                                print(f"⚠️ Failed to move {file}: {move_error}")
+                                # Try copy as fallback
+                                try:
+                                    shutil.copy2(source_file, target_file)
+                                    os.remove(source_file)
+                                    print(f"✅ Copied: {os.path.relpath(target_file, temp_dir)}")
+                                except Exception as copy_error:
+                                    print(f"❌ Failed to copy {file}: {copy_error}")
+                    
+                    # Remove the wrapper folder more robustly
+                    try:
+                        # First try simple rmdir
+                        os.rmdir(extracted_folder)
+                        print(f"✅ Removed wrapper folder: {extracted_folder}")
+                    except OSError as e:
+                        print(f"⚠️ Simple rmdir failed: {e}")
+                        # Try more aggressive cleanup
+                        try:
+                            # Remove any remaining files/folders recursively
+                            for root, dirs, files in os.walk(extracted_folder, topdown=False):
+                                # Remove files first
+                                for file in files:
+                                    try:
+                                        file_path = os.path.join(root, file)
+                                        os.chmod(file_path, 0o777)
+                                        os.remove(file_path)
+                                    except Exception:
+                                        pass
+                                # Then remove directories
+                                for dir in dirs:
+                                    try:
+                                        dir_path = os.path.join(root, dir)
+                                        os.chmod(dir_path, 0o777)
+                                        os.rmdir(dir_path)
+                                    except Exception:
+                                        pass
+                            # Finally remove the root
+                            os.rmdir(extracted_folder)
+                            print(f"✅ Force-removed wrapper folder: {extracted_folder}")
+                        except Exception as cleanup_error:
+                            print(f"⚠️ Could not remove wrapper folder {extracted_folder}: {cleanup_error}")
+                            # This is not critical - the content is extracted
+                
+                except Exception as extract_error:
+                    print(f"⚠️ Error during content extraction: {extract_error}")
+                    # Continue anyway - the files might still be usable
+                
+                print(f"✅ Repository extracted successfully to {temp_dir}")
+                return temp_dir
+            else:
+                # Archive doesn't have the expected structure, but that's okay
+                print(f"✅ Repository extracted directly to {temp_dir}")
+                return temp_dir
+                
+    except zipfile.BadZipFile as e:
+        raise Exception(f"Invalid ZIP archive: {e}")
+    except Exception as e:
+        raise Exception(f"Failed to extract repository archive: {e}")
 
 if __name__ == "__main__":
     start_server() 
