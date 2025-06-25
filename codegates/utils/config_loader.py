@@ -124,6 +124,16 @@ class ConfigLoader:
             'redoc_url': self.get('CODEGATES_API_REDOC_URL', '/redoc'),
         }
     
+    def get_git_config(self) -> Dict[str, Any]:
+        """Get Git and repository checkout configuration"""
+        return {
+            'prefer_api_checkout': self.get_boolean('CODEGATES_PREFER_API_CHECKOUT', False),
+            'enable_api_fallback': self.get_boolean('CODEGATES_ENABLE_API_FALLBACK', True),
+            'git_timeout': self.get_int('CODEGATES_GIT_TIMEOUT', 300),
+            'api_timeout': self.get_int('CODEGATES_API_TIMEOUT', 120),
+            'max_repo_size': self.get_int('CODEGATES_MAX_REPO_SIZE', 100),  # MB
+        }
+    
     def get_cors_config(self) -> Dict[str, Any]:
         """Get CORS configuration"""
         return {
@@ -210,6 +220,7 @@ class ConfigLoader:
         """Get all configuration sections"""
         return {
             'api': self.get_api_config(),
+            'git': self.get_git_config(),
             'cors': self.get_cors_config(),
             'vscode': self.get_vscode_config(),
             'reports': self.get_reports_config(),

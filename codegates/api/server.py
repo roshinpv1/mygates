@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Body, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Set
 import uvicorn
 import json
 import os
@@ -16,6 +16,13 @@ import requests
 from pathlib import Path
 from datetime import datetime
 import uuid
+import zipfile
+import io
+import contextlib
+import atexit
+import signal
+import weakref
+import time
 
 # Load environment variables first
 import sys
@@ -131,12 +138,38 @@ except ImportError:
     CORS_EXPOSE_HEADERS_STR = os.getenv('CODEGATES_CORS_EXPOSE_HEADERS', 'Content-Type,Content-Length,Date,Server')
     CORS_EXPOSE_HEADERS = [header.strip() for header in CORS_EXPOSE_HEADERS_STR.split(',')]
 
-# Create the main FastAPI app
+# Create the main FastAPI app with lifecycle management
 app = FastAPI(
     title=API_TITLE,
     description=API_DESCRIPTION,
     version="1.0.0"
 )
+
+@app.on_event("startup")
+async def startup_event():
+    """Handle application startup"""
+    print("🚀 MyGates API starting up...")
+    
+    # Clean up any orphaned directories from previous runs
+    print("🧹 Cleaning up orphaned directories from previous runs...")
+    cleanup_orphaned_temp_directories()
+    
+    print("✅ MyGates API startup complete")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Handle application shutdown"""
+    print("🛑 MyGates API shutting down...")
+    
+    # Clean up all registered temporary directories
+    print("🧹 Cleaning up all temporary directories...")
+    try:
+        await cleanup_all_temp_directories()
+        print("✅ Temporary directory cleanup completed")
+    except Exception as e:
+        print(f"⚠️ Error during shutdown cleanup: {e}")
+    
+    print("✅ MyGates API shutdown complete")
 
 # Configure CORS for the main app
 app.add_middleware(
@@ -167,12 +200,310 @@ api_v1.add_middleware(
 # In-memory storage for scan results (in production, use a database)
 scan_results = {}
 
+# Global registry for tracking temporary directories
+_TEMP_DIRECTORIES: Set[str] = set()
+_TEMP_DIR_LOCK = asyncio.Lock()
+
+def register_temp_directory(path: str):
+    """Register a temporary directory for cleanup"""
+    if path and os.path.exists(path):
+        _TEMP_DIRECTORIES.add(path)
+        print(f"📝 Registered temp directory for cleanup: {path}")
+
+def unregister_temp_directory(path: str):
+    """Unregister a temporary directory from cleanup"""
+    _TEMP_DIRECTORIES.discard(path)
+
+async def cleanup_temp_directory(path: str, description: str = "temporary directory") -> bool:
+    """
+    Robustly cleanup a temporary directory with comprehensive error handling
+    
+    Returns:
+        bool: True if cleanup was successful, False otherwise
+    """
+    if not path or not os.path.exists(path):
+        return True
+    
+    print(f"🧹 Cleaning up {description}: {path}")
+    
+    try:
+        # Unregister from global tracking
+        unregister_temp_directory(path)
+        
+        # Try multiple cleanup strategies
+        cleanup_strategies = [
+            _cleanup_with_shutil,
+            _cleanup_with_pathlib,
+            _cleanup_with_os_commands
+        ]
+        
+        for strategy in cleanup_strategies:
+            try:
+                if await strategy(path):
+                    print(f"✅ Successfully cleaned up {description}")
+                    return True
+            except Exception as e:
+                print(f"⚠️ Cleanup strategy failed for {path}: {e}")
+                continue
+        
+        print(f"❌ All cleanup strategies failed for {path}")
+        return False
+        
+    except Exception as e:
+        print(f"❌ Critical cleanup error for {path}: {e}")
+        return False
+
+async def _cleanup_with_shutil(path: str) -> bool:
+    """Cleanup using shutil.rmtree"""
+    def _remove():
+        # Make all files writable before deletion (handles permission issues)
+        for root, dirs, files in os.walk(path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                try:
+                    os.chmod(file_path, 0o777)
+                except (OSError, PermissionError):
+                    pass
+            for dir in dirs:
+                dir_path = os.path.join(root, dir)
+                try:
+                    os.chmod(dir_path, 0o777)
+                except (OSError, PermissionError):
+                    pass
+        
+        shutil.rmtree(path, ignore_errors=True)
+        return not os.path.exists(path)
+    
+    # Run in thread to avoid blocking
+    return await asyncio.to_thread(_remove)
+
+async def _cleanup_with_pathlib(path: str) -> bool:
+    """Cleanup using pathlib for better error handling"""
+    def _remove():
+        from pathlib import Path
+        target = Path(path)
+        
+        # Remove files first, then directories
+        for item in target.rglob('*'):
+            if item.is_file():
+                try:
+                    item.chmod(0o777)
+                    item.unlink()
+                except (OSError, PermissionError):
+                    pass
+        
+        # Remove directories in reverse order (deepest first)
+        for item in sorted(target.rglob('*'), key=lambda p: len(p.parts), reverse=True):
+            if item.is_dir():
+                try:
+                    item.rmdir()
+                except (OSError, PermissionError):
+                    pass
+        
+        # Finally remove the root directory
+        try:
+            target.rmdir()
+        except (OSError, PermissionError):
+            pass
+        
+        return not target.exists()
+    
+    return await asyncio.to_thread(_remove)
+
+async def _cleanup_with_os_commands(path: str) -> bool:
+    """Cleanup using OS commands as last resort"""
+    try:
+        import platform
+        system = platform.system().lower()
+        
+        if system in ['linux', 'darwin']:  # Unix-like systems
+            result = await asyncio.create_subprocess_exec(
+                'rm', '-rf', path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            await result.wait()
+            return not os.path.exists(path)
+        elif system == 'windows':
+            result = await asyncio.create_subprocess_exec(
+                'rmdir', '/s', '/q', path,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                shell=True
+            )
+            await result.wait()
+            return not os.path.exists(path)
+        
+    except Exception:
+        pass
+    
+    return False
+
+async def cleanup_all_temp_directories():
+    """Cleanup all registered temporary directories"""
+    if not _TEMP_DIRECTORIES:
+        return
+    
+    print(f"🧹 Cleaning up {len(_TEMP_DIRECTORIES)} registered temporary directories...")
+    
+    async with _TEMP_DIR_LOCK:
+        temp_dirs = list(_TEMP_DIRECTORIES)  # Create a copy to avoid modification during iteration
+        
+        cleanup_tasks = []
+        for temp_dir in temp_dirs:
+            task = cleanup_temp_directory(temp_dir, f"registered temp directory")
+            cleanup_tasks.append(task)
+        
+        # Run all cleanups concurrently
+        if cleanup_tasks:
+            results = await asyncio.gather(*cleanup_tasks, return_exceptions=True)
+            successful_cleanups = sum(1 for result in results if result is True)
+            print(f"✅ Successfully cleaned up {successful_cleanups}/{len(cleanup_tasks)} directories")
+
+def cleanup_orphaned_temp_directories():
+    """Cleanup orphaned temporary directories from previous runs"""
+    try:
+        temp_base_options = [
+            os.environ.get('TEMP_REPO_DIR'),
+            os.environ.get('TMPDIR'),
+            '/tmp',
+            './temp'
+        ]
+        
+        cleaned_count = 0
+        for temp_base in temp_base_options:
+            if not temp_base or not os.path.exists(temp_base):
+                continue
+            
+            try:
+                for item in os.listdir(temp_base):
+                    if item.startswith('mygates_'):
+                        orphaned_path = os.path.join(temp_base, item)
+                        if os.path.isdir(orphaned_path):
+                            try:
+                                # Check if directory is old (more than 1 hour)
+                                stat = os.stat(orphaned_path)
+                                age = time.time() - stat.st_mtime
+                                if age > 3600:  # 1 hour
+                                    shutil.rmtree(orphaned_path, ignore_errors=True)
+                                    if not os.path.exists(orphaned_path):
+                                        cleaned_count += 1
+                                        print(f"🧹 Cleaned orphaned directory: {orphaned_path}")
+                            except Exception as e:
+                                print(f"⚠️ Failed to clean orphaned directory {orphaned_path}: {e}")
+                
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Cannot access temp base {temp_base}: {e}")
+        
+        if cleaned_count > 0:
+            print(f"✅ Cleaned up {cleaned_count} orphaned temporary directories")
+            
+    except Exception as e:
+        print(f"⚠️ Error during orphaned directory cleanup: {e}")
+
+@contextlib.asynccontextmanager
+async def managed_temp_directory(prefix: str = "mygates_", description: str = "temporary directory"):
+    """
+    Context manager for temporary directories with guaranteed cleanup
+    """
+    temp_dir = None
+    try:
+        # Try multiple temporary directory options for container compatibility
+        temp_base_options = [
+            os.environ.get('TEMP_REPO_DIR'),
+            os.environ.get('TMPDIR'),
+            '/tmp',
+            './temp',
+            '.'
+        ]
+        
+        for temp_base in temp_base_options:
+            if not temp_base:
+                continue
+                
+            try:
+                os.makedirs(temp_base, exist_ok=True)
+                test_file = os.path.join(temp_base, f'.write_test_{os.getpid()}')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+                
+                temp_dir = tempfile.mkdtemp(prefix=prefix, dir=temp_base)
+                register_temp_directory(temp_dir)
+                print(f"📁 Created managed {description}: {temp_dir}")
+                break
+                
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Cannot use {temp_base} for {description}: {e}")
+                continue
+        
+        if not temp_dir:
+            raise Exception(f"No writable location found for {description}")
+        
+        yield temp_dir
+        
+    finally:
+        if temp_dir:
+            await cleanup_temp_directory(temp_dir, description)
+
+# Setup cleanup handlers
+def _cleanup_handler(signum=None, frame=None):
+    """Handle cleanup on application shutdown"""
+    print("🧹 Application shutdown - cleaning up temporary directories...")
+    
+    # Run cleanup in the current event loop if available
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(cleanup_all_temp_directories())
+    except RuntimeError:
+        # No event loop running, create a new one
+        asyncio.run(cleanup_all_temp_directories())
+
+# Register cleanup handlers
+atexit.register(_cleanup_handler)
+signal.signal(signal.SIGTERM, _cleanup_handler)
+signal.signal(signal.SIGINT, _cleanup_handler)
+
+# Cleanup orphaned directories on startup
+cleanup_orphaned_temp_directories()
+
+def get_default_scan_options() -> Dict[str, Any]:
+    """Get default scan options from environment configuration"""
+    try:
+        from codegates.utils.config_loader import get_config
+        config = get_config()
+        git_config = config.get_git_config()
+        
+        return {
+            'threshold': 70,  # Keep hardcoded default for threshold
+            'prefer_api_checkout': git_config['prefer_api_checkout'],
+            'enable_api_fallback': git_config['enable_api_fallback']
+        }
+    except Exception as e:
+        print(f"⚠️ Failed to load git configuration, using hardcoded defaults: {e}")
+        return {
+            'threshold': 70,
+            'prefer_api_checkout': False,
+            'enable_api_fallback': True
+        }
+
+# Get environment-based defaults at startup
+_DEFAULT_SCAN_OPTIONS = get_default_scan_options()
+
 class ScanOptions(BaseModel):
     threshold: Optional[int] = Field(
-        default=70,
+        default=_DEFAULT_SCAN_OPTIONS['threshold'],
         ge=0,
         le=100,
         description="Quality threshold percentage (0-100)"
+    )
+    prefer_api_checkout: Optional[bool] = Field(
+        default=_DEFAULT_SCAN_OPTIONS['prefer_api_checkout'],
+        description="Prefer GitHub API for repository checkout over git clone. Useful when git is not available or unreliable."
+    )
+    enable_api_fallback: Optional[bool] = Field(
+        default=_DEFAULT_SCAN_OPTIONS['enable_api_fallback'],
+        description="Enable automatic fallback to GitHub API if git clone fails. Recommended for robust operation."
     )
 
 class JiraOptions(BaseModel):
@@ -427,8 +758,192 @@ def ensure_writable_directory(path: str, description: str = "directory") -> str:
     # If all options failed, raise an error
     raise Exception(f"No writable {description} found. Please set appropriate environment variables or ensure container has write permissions.")
 
-def clone_repository(repo_url: str, branch: str, token: Optional[str] = None) -> str:
-    """Clone repository to temporary directory with OCP container support"""
+def download_repository_via_api(repo_url: str, branch: str, token: Optional[str] = None) -> str:
+    """Download repository using GitHub API as fallback when git clone fails"""
+    
+    try:
+        # Parse repository URL to extract owner and repo
+        parsed_url = urlparse(repo_url)
+        path_parts = parsed_url.path.strip('/').split('/')
+        
+        if len(path_parts) < 2:
+            raise Exception("Invalid repository URL format for API download")
+        
+        owner = path_parts[0]
+        repo = path_parts[1]
+        
+        # Clean up repo name if it ends with .git
+        if repo.endswith('.git'):
+            repo = repo[:-4]
+        
+        # Determine API base URL (GitHub.com vs GitHub Enterprise)
+        if parsed_url.netloc.lower() == 'github.com':
+            api_base_url = 'https://api.github.com'
+        else:
+            # GitHub Enterprise
+            api_base_url = f"https://{parsed_url.netloc}/api/v3"
+        
+        print(f"🌐 Attempting API download from {api_base_url}")
+        print(f"📦 Repository: {owner}/{repo}, Branch: {branch}")
+        
+        # Create temporary directory for extraction
+        temp_base_options = [
+            os.environ.get('TEMP_REPO_DIR'),
+            os.environ.get('TMPDIR'),
+            '/tmp',
+            './temp',
+            '.'
+        ]
+        
+        temp_dir = None
+        for temp_base in temp_base_options:
+            if not temp_base:
+                continue
+                
+            try:
+                os.makedirs(temp_base, exist_ok=True)
+                test_file = os.path.join(temp_base, f'.write_test_{os.getpid()}')
+                with open(test_file, 'w') as f:
+                    f.write('test')
+                os.remove(test_file)
+                
+                temp_dir = tempfile.mkdtemp(prefix="mygates_api_", dir=temp_base)
+                register_temp_directory(temp_dir)
+                print(f"📁 Using temporary directory for API download: {temp_dir}")
+                break
+                
+            except (OSError, PermissionError) as e:
+                print(f"⚠️ Cannot use {temp_base} for API download: {e}")
+                continue
+        
+        if not temp_dir:
+            raise Exception("No writable temporary directory found for API download")
+        
+        # Download repository archive via API
+        archive_url = f"{api_base_url}/repos/{owner}/{repo}/zipball/{branch}"
+        
+        headers = {'Accept': 'application/vnd.github.v3+json'}
+        if token:
+            headers['Authorization'] = f'token {token}'
+        
+        print(f"🔄 Downloading repository archive...")
+        response = requests.get(archive_url, headers=headers, timeout=120)
+        
+        if response.status_code == 200:
+            print(f"✅ Repository archive downloaded successfully ({len(response.content)} bytes)")
+            
+            # Extract ZIP archive
+            try:
+                with zipfile.ZipFile(io.BytesIO(response.content)) as zip_ref:
+                    # GitHub creates a folder with format: owner-repo-commit_hash
+                    # We need to extract and rename it properly
+                    zip_ref.extractall(temp_dir)
+                    
+                    # Find the extracted folder (should be only one)
+                    extracted_items = os.listdir(temp_dir)
+                    if len(extracted_items) == 1 and os.path.isdir(os.path.join(temp_dir, extracted_items[0])):
+                        extracted_folder = os.path.join(temp_dir, extracted_items[0])
+                        
+                        # Move contents to temp_dir root and remove the wrapper folder
+                        import glob
+                        for item in glob.glob(os.path.join(extracted_folder, '*')):
+                            dest_item = os.path.join(temp_dir, os.path.basename(item))
+                            if os.path.exists(dest_item):
+                                if os.path.isdir(dest_item):
+                                    shutil.rmtree(dest_item)
+                                else:
+                                    os.remove(dest_item)
+                            shutil.move(item, temp_dir)
+                        
+                        # Remove the now-empty extracted folder
+                        os.rmdir(extracted_folder)
+                        
+                        print(f"✅ Repository extracted successfully to {temp_dir}")
+                        return temp_dir
+                    else:
+                        raise Exception("Unexpected archive structure after extraction")
+                        
+            except zipfile.BadZipFile as e:
+                raise Exception(f"Failed to extract repository archive: {e}")
+                
+        elif response.status_code == 401:
+            raise Exception("Authentication failed. Please check your GitHub token.")
+        elif response.status_code == 403:
+            raise Exception("Access forbidden. Token may lack required permissions.")
+        elif response.status_code == 404:
+            raise Exception(f"Repository or branch not found: {owner}/{repo}@{branch}")
+        else:
+            raise Exception(f"API download failed with status {response.status_code}: {response.text}")
+            
+    except requests.RequestException as e:
+        raise Exception(f"Network error during API download: {e}")
+    except Exception as e:
+        # Cleanup on failure
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                asyncio.create_task(cleanup_temp_directory(temp_dir, "API download directory"))
+            except RuntimeError:
+                # No event loop running, use basic cleanup
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as cleanup_error:
+                    print(f"⚠️ Failed to cleanup API download directory {temp_dir}: {cleanup_error}")
+        raise e
+
+def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, prefer_api: bool = False) -> str:
+    """
+    Clone repository with Git fallback to GitHub API
+    
+    Args:
+        repo_url: Repository URL
+        branch: Branch to checkout
+        token: GitHub token (optional)
+        prefer_api: If True, try API first; if False, try git first
+    """
+    
+    git_error = None
+    api_error = None
+    
+    # Determine order of methods to try
+    if prefer_api:
+        methods = [
+            ("GitHub API", download_repository_via_api),
+            ("Git Clone", _clone_repository_via_git)
+        ]
+    else:
+        methods = [
+            ("Git Clone", _clone_repository_via_git),
+            ("GitHub API", download_repository_via_api)
+        ]
+    
+    for method_name, method_func in methods:
+        try:
+            print(f"🔄 Trying {method_name} for repository checkout...")
+            result = method_func(repo_url, branch, token)
+            print(f"✅ Successfully checked out repository using {method_name}")
+            return result
+            
+        except Exception as e:
+            print(f"❌ {method_name} failed: {str(e)}")
+            if method_name == "Git Clone":
+                git_error = str(e)
+            else:
+                api_error = str(e)
+            
+            # Continue to next method
+            continue
+    
+    # Both methods failed, raise comprehensive error
+    error_details = []
+    if git_error:
+        error_details.append(f"Git Clone: {git_error}")
+    if api_error:
+        error_details.append(f"API Download: {api_error}")
+    
+    raise Exception(f"All repository checkout methods failed. Errors: {'; '.join(error_details)}")
+
+def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] = None) -> str:
+    """Original git clone implementation (extracted from clone_repository)"""
     
     # Try multiple temporary directory options for container compatibility
     temp_base_options = [
@@ -455,16 +970,17 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None) ->
             os.remove(test_file)
             
             # Create unique temporary directory
-            temp_dir = tempfile.mkdtemp(prefix="mygates_", dir=temp_base)
-            print(f"📁 Using temporary directory: {temp_dir}")
+            temp_dir = tempfile.mkdtemp(prefix="mygates_git_", dir=temp_base)
+            register_temp_directory(temp_dir)
+            print(f"📁 Using temporary directory for git clone: {temp_dir}")
             break
             
         except (OSError, PermissionError) as e:
-            print(f"⚠️ Cannot use {temp_base}: {e}")
+            print(f"⚠️ Cannot use {temp_base} for git clone: {e}")
             continue
     
     if not temp_dir:
-        raise Exception("No writable temporary directory found. Set TEMP_REPO_DIR environment variable to a writable path.")
+        raise Exception("No writable temporary directory found for git clone. Set TEMP_REPO_DIR environment variable to a writable path.")
     
     try:
         # Build clone URL
@@ -488,24 +1004,42 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None) ->
         
         if result.returncode != 0:
             error_msg = result.stderr.strip()
-            print(f"❌ Git clone failed: {error_msg}")
             
             # Enhanced error messages for containers
             if 'permission denied' in error_msg.lower():
                 raise Exception(f"Permission denied during git clone. This might be due to container security constraints. Error: {error_msg}")
+            elif 'command not found' in error_msg.lower() or 'git' in error_msg.lower():
+                raise Exception(f"Git command not available. Consider using API fallback. Error: {error_msg}")
             else:
                 raise Exception(f"Git clone failed: {error_msg}")
         
-        print(f"✅ Repository cloned successfully to {temp_dir}")
+        print(f"✅ Repository cloned successfully via git to {temp_dir}")
         return temp_dir
+        
+    except subprocess.TimeoutExpired:
+        # Cleanup on timeout
+        if temp_dir and os.path.exists(temp_dir):
+            try:
+                asyncio.create_task(cleanup_temp_directory(temp_dir, "git clone directory"))
+            except RuntimeError:
+                # No event loop running, use basic cleanup
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
+        raise Exception("Git clone operation timed out after 5 minutes")
         
     except Exception as e:
         # Cleanup on failure
         if temp_dir and os.path.exists(temp_dir):
             try:
-                shutil.rmtree(temp_dir)
-            except Exception as cleanup_error:
-                print(f"⚠️ Failed to cleanup {temp_dir}: {cleanup_error}")
+                asyncio.create_task(cleanup_temp_directory(temp_dir, "git clone directory"))
+            except RuntimeError:
+                # No event loop running, use basic cleanup
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception as cleanup_error:
+                    print(f"⚠️ Failed to cleanup git clone directory {temp_dir}: {cleanup_error}")
         raise e
 
 def analyze_repository(repo_path: str, threshold: int, repository_url: Optional[str] = None) -> Dict:
@@ -744,23 +1278,61 @@ def perform_basic_analysis(repo_path: str, threshold: int) -> Dict:
 
 async def perform_scan(scan_id: str, request: ScanRequest):
     """Perform the actual repository scan with timeout handling"""
+    repo_path = None
     try:
         # Update status to running
         scan_results[scan_id]["status"] = "running"
         scan_results[scan_id]["message"] = "Cloning repository..."
         
-        # Clone repository
-        repo_path = clone_repository(
-            request.repository_url, 
-            request.branch, 
-            request.github_token
-        )
+        # Get scan options with environment defaults
+        scan_options = request.scan_options or ScanOptions()
+        
+        # Debug: Show which options are being used
+        print(f"🔧 Scan Options Configuration:")
+        print(f"   threshold: {scan_options.threshold}")
+        print(f"   prefer_api_checkout: {scan_options.prefer_api_checkout} {'(from env)' if _DEFAULT_SCAN_OPTIONS['prefer_api_checkout'] else '(default)'}")
+        print(f"   enable_api_fallback: {scan_options.enable_api_fallback} {'(from env)' if _DEFAULT_SCAN_OPTIONS['enable_api_fallback'] else '(default)'}")
+        
+        # Determine checkout method preferences
+        prefer_api = scan_options.prefer_api_checkout
+        enable_fallback = scan_options.enable_api_fallback
+        
+        print(f"🔄 Repository checkout method: {'API preferred' if prefer_api else 'Git preferred'} (fallback {'enabled' if enable_fallback else 'disabled'})")
+        
+        # Clone repository with API fallback support
+        if enable_fallback:
+            # Use the enhanced clone_repository with fallback
+            repo_path = clone_repository(
+                request.repository_url, 
+                request.branch, 
+                request.github_token,
+                prefer_api=prefer_api
+            )
+        else:
+            # Use only git clone (legacy behavior)
+            try:
+                repo_path = _clone_repository_via_git(
+                    request.repository_url, 
+                    request.branch, 
+                    request.github_token
+                )
+            except Exception as git_error:
+                if prefer_api:
+                    # Fallback to API even if fallback is disabled but API is preferred
+                    print("🔄 Git failed, trying API as requested preference...")
+                    repo_path = download_repository_via_api(
+                        request.repository_url, 
+                        request.branch, 
+                        request.github_token
+                    )
+                else:
+                    raise git_error
         
         try:
             scan_results[scan_id]["message"] = "Analyzing repository with optimized LLM processing..."
             
             # Analyze repository with timeout
-            threshold = request.scan_options.threshold if request.scan_options else 70
+            threshold = scan_options.threshold
             
             # Use asyncio timeout for better control
             try:
@@ -783,7 +1355,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                     "total_lines": analysis_result.get('total_lines', 0),
                     "result_object": analysis_result.get('result_object'),  # Store full result for HTML generation
                     "repository_url": request.repository_url,  # Store repository URL
-                    "branch": request.branch  # Store branch
+                    "branch": request.branch,  # Store branch
+                    "checkout_method": analysis_result.get('checkout_method', 'unknown')  # Track which method was used
                 })
                 
                 # Generate and save HTML report immediately
@@ -909,18 +1482,44 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                 })
                 
         finally:
-            # Cleanup cloned repository
-            if os.path.exists(repo_path):
-                shutil.rmtree(repo_path)
+            # Enhanced cleanup - use the robust cleanup system
+            if repo_path and os.path.exists(repo_path):
+                print(f"🧹 Starting cleanup of repository directory: {repo_path}")
+                cleanup_success = await cleanup_temp_directory(repo_path, "repository scan directory")
+                if cleanup_success:
+                    print(f"✅ Repository directory cleaned up successfully")
+                else:
+                    print(f"⚠️ Repository directory cleanup had issues, but scan completed")
                 
     except Exception as e:
         print(f"❌ Scan failed for {scan_id}: {str(e)}")
+        
+        # Enhanced error handling with cleanup
         scan_results[scan_id].update({
             "status": "failed",
             "message": f"Scan failed: {str(e)}",
             "error": str(e),
             "completed_at": datetime.now().isoformat()
         })
+        
+        # Cleanup on failure as well
+        if repo_path and os.path.exists(repo_path):
+            print(f"🧹 Cleaning up after scan failure: {repo_path}")
+            try:
+                cleanup_success = await cleanup_temp_directory(repo_path, "failed scan directory")
+                if cleanup_success:
+                    print(f"✅ Failed scan directory cleaned up successfully")
+            except Exception as cleanup_error:
+                print(f"⚠️ Failed to cleanup after scan failure: {cleanup_error}")
+    
+    finally:
+        # Additional safety cleanup - ensure no temp directories are left behind
+        print(f"🧹 Final cleanup check for scan {scan_id}")
+        try:
+            # Clean up any remaining registered temp directories
+            await cleanup_all_temp_directories()
+        except Exception as final_cleanup_error:
+            print(f"⚠️ Final cleanup check failed: {final_cleanup_error}")
 
 @api_v1.options("/{path:path}")
 async def options_handler(path: str):
@@ -1284,6 +1883,77 @@ async def post_to_jira(request: JiraPostRequest):
         
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_v1.get("/system/cleanup")
+async def manual_cleanup():
+    """Manually trigger cleanup of all temporary directories."""
+    try:
+        # Clean up all registered temp directories
+        await cleanup_all_temp_directories()
+        
+        # Clean up orphaned directories
+        cleanup_orphaned_temp_directories()
+        
+        return {
+            "status": "success",
+            "message": "Cleanup completed successfully",
+            "timestamp": datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Cleanup failed: {str(e)}",
+            "timestamp": datetime.now().isoformat()
+        }
+
+@api_v1.get("/system/temp-status")
+async def get_temp_directory_status():
+    """Get status of temporary directories."""
+    try:
+        temp_status = {
+            "registered_directories": len(_TEMP_DIRECTORIES),
+            "directories": list(_TEMP_DIRECTORIES),
+            "orphaned_check": {}
+        }
+        
+        # Check for orphaned directories
+        temp_base_options = [
+            os.environ.get('TEMP_REPO_DIR'),
+            os.environ.get('TMPDIR'),
+            '/tmp',
+            './temp'
+        ]
+        
+        for temp_base in temp_base_options:
+            if not temp_base or not os.path.exists(temp_base):
+                continue
+            
+            try:
+                orphaned_dirs = []
+                for item in os.listdir(temp_base):
+                    if item.startswith('mygates_'):
+                        orphaned_path = os.path.join(temp_base, item)
+                        if os.path.isdir(orphaned_path):
+                            stat = os.stat(orphaned_path)
+                            age_hours = (time.time() - stat.st_mtime) / 3600
+                            orphaned_dirs.append({
+                                "path": orphaned_path,
+                                "age_hours": round(age_hours, 2),
+                                "size_mb": round(sum(os.path.getsize(os.path.join(dirpath, filename)) 
+                                                   for dirpath, dirnames, filenames in os.walk(orphaned_path) 
+                                                   for filename in filenames) / (1024*1024), 2)
+                            })
+                
+                temp_status["orphaned_check"][temp_base] = orphaned_dirs
+                
+            except (OSError, PermissionError) as e:
+                temp_status["orphaned_check"][temp_base] = f"Access denied: {e}"
+        
+        return temp_status
+        
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
