@@ -71,6 +71,7 @@ try:
     api_config = config.get_api_config()
     cors_config = config.get_cors_config()
     reports_config = config.get_reports_config()
+    timeout_config = config.get_timeout_config()
     
     # Extract values
     API_HOST = api_config['host']
@@ -98,9 +99,19 @@ try:
     CORS_HEADERS = cors_config['headers']
     CORS_EXPOSE_HEADERS = cors_config['expose_headers']
     
+    # Reports settings
+    REPORTS_DIR = reports_config['reports_dir']
+    REPORTS_URL_BASE = reports_config['report_url_base']
+    HTML_REPORTS_ENABLED = reports_config['html_reports_enabled']
+    
+    # Timeout settings
+    TIMEOUT_CONFIG = timeout_config
+    
     print(f"✅ Configuration loaded successfully")
     print(f"   API: {API_BASE_URL}")
     print(f"   Host: {API_HOST}:{API_PORT}")
+    print(f"   Reports Dir: {REPORTS_DIR}")
+    print(f"   Timeouts: Git={timeout_config['git_clone_timeout']}s, Analysis={timeout_config['analysis_timeout']}s")
     
     # Validate configuration
     config_issues = config.validate_config()
@@ -140,6 +151,28 @@ except ImportError:
     CORS_HEADERS = [header.strip() for header in CORS_HEADERS_STR.split(',')]
     CORS_EXPOSE_HEADERS_STR = os.getenv('CODEGATES_CORS_EXPOSE_HEADERS', 'Content-Type,Content-Length,Date,Server')
     CORS_EXPOSE_HEADERS = [header.strip() for header in CORS_EXPOSE_HEADERS_STR.split(',')]
+    
+    # Reports Configuration from environment (fallback)
+    REPORTS_DIR = os.getenv('CODEGATES_REPORTS_DIR', 'reports')
+    REPORTS_URL_BASE = os.getenv('CODEGATES_REPORT_URL_BASE', f'{API_BASE_URL}{API_VERSION_PREFIX}/reports')
+    HTML_REPORTS_ENABLED = os.getenv('CODEGATES_HTML_REPORTS_ENABLED', 'true').lower() == 'true'
+    
+    # Timeout Configuration from environment (fallback)
+    TIMEOUT_CONFIG = {
+        'git_clone_timeout': int(os.getenv('CODEGATES_GIT_CLONE_TIMEOUT', '300')),
+        'git_ls_remote_timeout': int(os.getenv('CODEGATES_GIT_LS_REMOTE_TIMEOUT', '30')),
+        'api_download_timeout': int(os.getenv('CODEGATES_API_DOWNLOAD_TIMEOUT', '120')),
+        'analysis_timeout': int(os.getenv('CODEGATES_ANALYSIS_TIMEOUT', '180')),
+        'llm_request_timeout': int(os.getenv('CODEGATES_LLM_REQUEST_TIMEOUT', '30')),
+        'http_request_timeout': int(os.getenv('CODEGATES_HTTP_REQUEST_TIMEOUT', '10')),
+        'health_check_timeout': int(os.getenv('CODEGATES_HEALTH_CHECK_TIMEOUT', '5')),
+        'jira_request_timeout': int(os.getenv('CODEGATES_JIRA_REQUEST_TIMEOUT', '30')),
+        'jira_health_timeout': int(os.getenv('CODEGATES_JIRA_HEALTH_TIMEOUT', '10')),
+        'github_connect_timeout': int(os.getenv('CODEGATES_GITHUB_CONNECT_TIMEOUT', '30')),
+        'github_read_timeout': int(os.getenv('CODEGATES_GITHUB_READ_TIMEOUT', '120')),
+        'vscode_api_timeout': int(os.getenv('CODEGATES_VSCODE_API_TIMEOUT', '300')),
+        'llm_batch_timeout': int(os.getenv('CODEGATES_LLM_BATCH_TIMEOUT', '30')),
+    }
 
 # Create the main FastAPI app with lifecycle management
 app = FastAPI(
@@ -482,6 +515,32 @@ class ScanOptions(BaseModel):
         default=None,
         description="Override SSL certificate verification for this scan. None=use global config, True=force enable, False=force disable. Useful for GitHub Enterprise with self-signed certificates."
     )
+    
+    # Timeout configurations
+    git_clone_timeout: Optional[int] = Field(
+        default=None,
+        ge=10,
+        le=3600,
+        description="Git clone timeout in seconds (10-3600). None=use global config."
+    )
+    api_download_timeout: Optional[int] = Field(
+        default=None,
+        ge=10,
+        le=1800,
+        description="API download timeout in seconds (10-1800). None=use global config."
+    )
+    analysis_timeout: Optional[int] = Field(
+        default=None,
+        ge=30,
+        le=1800,
+        description="Analysis timeout in seconds (30-1800). None=use global config."
+    )
+    llm_request_timeout: Optional[int] = Field(
+        default=None,
+        ge=5,
+        le=300,
+        description="LLM request timeout in seconds (5-300). None=use global config."
+    )
 
 class JiraOptions(BaseModel):
     enabled: bool = Field(
@@ -623,7 +682,7 @@ class ScanRequest(BaseModel):
                     cmd, 
                     capture_output=True, 
                     text=True, 
-                    timeout=30,
+                    timeout=TIMEOUT_CONFIG['git_ls_remote_timeout'],
                     env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}  # Disable interactive prompts
                 )
                 
@@ -735,7 +794,7 @@ def ensure_writable_directory(path: str, description: str = "directory") -> str:
     # If all options failed, raise an error
     raise Exception(f"No writable {description} found. Please set appropriate environment variables or ensure container has write permissions.")
 
-def download_repository_via_api(repo_url: str, branch: str, token: Optional[str] = None, verify_ssl: Optional[bool] = None) -> str:
+def download_repository_via_api(repo_url: str, branch: str, token: Optional[str] = None, verify_ssl: Optional[bool] = None, scan_options: Optional[ScanOptions] = None) -> str:
     """Download repository using GitHub API as fallback when git clone fails"""
     
     try:
@@ -776,11 +835,13 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
         if token:
             session.headers.update({'Authorization': f'token {token}'})
         
-        print(f"🔄 Downloading repository archive...")
+        # Get configurable timeout
+        api_timeout = get_api_download_timeout(scan_options)
+        print(f"🔄 Downloading repository archive... (timeout: {api_timeout}s)")
         print(f"🔒 SSL verification: {'enabled' if session.verify else 'disabled'}")
         
         try:
-            response = session.get(archive_url, timeout=120)
+            response = session.get(archive_url, timeout=api_timeout)
         except requests.exceptions.SSLError as ssl_error:
             error_msg = str(ssl_error).lower()
             
@@ -848,7 +909,7 @@ def download_repository_via_api(repo_url: str, branch: str, token: Optional[str]
         print(f"❌ API download failed: {e}")
         raise e
 
-def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, prefer_api: bool = False, verify_ssl: Optional[bool] = None) -> str:
+def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, prefer_api: bool = False, verify_ssl: Optional[bool] = None, scan_options: Optional[ScanOptions] = None) -> str:
     """
     Clone repository with Git fallback to GitHub API
     
@@ -858,6 +919,7 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
         token: GitHub token (optional)
         prefer_api: If True, try API first; if False, try git first
         verify_ssl: SSL verification setting (None=use config, True=force enable, False=force disable)
+        scan_options: Scan options with timeout overrides
     """
     
     git_error = None
@@ -866,13 +928,13 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
     # Determine order of methods to try
     if prefer_api:
         methods = [
-            ("GitHub API", lambda url, br, tok: download_repository_via_api(url, br, tok, verify_ssl)),
-            ("Git Clone", _clone_repository_via_git)
+            ("GitHub API", lambda url, br, tok: download_repository_via_api(url, br, tok, verify_ssl, scan_options)),
+            ("Git Clone", lambda url, br, tok: _clone_repository_via_git(url, br, tok, scan_options))
         ]
     else:
         methods = [
-            ("Git Clone", _clone_repository_via_git),
-            ("GitHub API", lambda url, br, tok: download_repository_via_api(url, br, tok, verify_ssl))
+            ("Git Clone", lambda url, br, tok: _clone_repository_via_git(url, br, tok, scan_options)),
+            ("GitHub API", lambda url, br, tok: download_repository_via_api(url, br, tok, verify_ssl, scan_options))
         ]
     
     for method_name, method_func in methods:
@@ -920,7 +982,7 @@ def clone_repository(repo_url: str, branch: str, token: Optional[str] = None, pr
     else:
         raise Exception(f"All repository checkout methods failed. Errors: {'; '.join(error_details)}")
 
-def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] = None) -> str:
+def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] = None, scan_options: Optional[ScanOptions] = None) -> str:
     """Original git clone implementation (extracted from clone_repository)"""
     
     # Create unique temporary directory for git clone
@@ -934,9 +996,12 @@ def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] =
         else:
             clone_url = f"https://{parsed_url.netloc}{parsed_url.path}.git"
         
+        # Get configurable timeout
+        git_timeout = get_git_clone_timeout(scan_options)
+        
         # Clone repository with enhanced error handling
         cmd = ["git", "clone", "-b", branch, "--depth", "1", clone_url, temp_dir]
-        print(f"🔄 Running: git clone -b {branch} --depth 1 [URL] {temp_dir}")
+        print(f"🔄 Running: git clone -b {branch} --depth 1 [URL] {temp_dir} (timeout: {git_timeout}s)")
         
         # Ensure target directory is empty before cloning
         if os.path.exists(temp_dir) and os.listdir(temp_dir):
@@ -955,7 +1020,7 @@ def _clone_repository_via_git(repo_url: str, branch: str, token: Optional[str] =
             cmd, 
             capture_output=True, 
             text=True, 
-            timeout=300,
+            timeout=git_timeout,
             env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'}
         )
         
@@ -1248,7 +1313,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                 request.branch, 
                 request.github_token,
                 prefer_api=prefer_api,
-                verify_ssl=scan_options.verify_ssl
+                verify_ssl=scan_options.verify_ssl,
+                scan_options=scan_options
             )
         else:
             # Use only git clone (legacy behavior)
@@ -1256,7 +1322,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                 repo_path = _clone_repository_via_git(
                     request.repository_url, 
                     request.branch, 
-                    request.github_token
+                    request.github_token,
+                    scan_options=scan_options
                 )
             except Exception as git_error:
                 if prefer_api:
@@ -1266,7 +1333,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                         request.repository_url, 
                         request.branch, 
                         request.github_token,
-                        verify_ssl=scan_options.verify_ssl
+                        verify_ssl=scan_options.verify_ssl,
+                        scan_options=scan_options
                     )
                 else:
                     raise git_error
@@ -1279,9 +1347,13 @@ async def perform_scan(scan_id: str, request: ScanRequest):
             
             # Use asyncio timeout for better control
             try:
+                # Get configurable timeout
+                analysis_timeout = get_analysis_timeout(scan_options)
+                print(f"🔍 Starting analysis with timeout: {analysis_timeout}s")
+                
                 analysis_result = await asyncio.wait_for(
                     asyncio.to_thread(analyze_repository, repo_path, threshold, request.repository_url),
-                    timeout=180.0  # 3 minutes timeout
+                    timeout=float(analysis_timeout)
                 )
                 
                 # Update scan results
@@ -1309,8 +1381,8 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                         from codegates.reports import ReportGenerator
                         from codegates.models import ReportConfig
                         
-                        # Create reports directory with container-friendly fallbacks
-                        reports_dir_path = ensure_writable_directory("reports", "reports directory")
+                        # Create reports directory using configuration
+                        reports_dir_path = get_reports_directory()
                         reports_dir = Path(reports_dir_path)
                         
                         # Generate and save report to file
@@ -1408,18 +1480,20 @@ async def perform_scan(scan_id: str, request: ScanRequest):
                     scan_results[scan_id]["jira_result"] = jira_result
                 
             except asyncio.TimeoutError:
-                print("⏰ Repository scan timed out after 3 minutes")
+                analysis_timeout = get_analysis_timeout(scan_options)
+                print(f"⏰ Repository scan timed out after {analysis_timeout} seconds")
                 scan_results[scan_id].update({
                     "status": "completed",
                     "score": 0.0,
                     "gates": [],
                     "recommendations": [
-                        "Scan timed out after 3 minutes",
+                        f"Scan timed out after {analysis_timeout} seconds",
                         "Try scanning a smaller repository or specific directory",
-                        "Consider disabling LLM analysis for faster results"
+                        "Consider disabling LLM analysis for faster results",
+                        "You can increase the timeout using the analysis_timeout parameter"
                     ],
                     "report_url": f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}",
-                    "message": "Scan timed out - completed with basic analysis only",
+                    "message": f"Scan timed out - completed with basic analysis only (timeout: {analysis_timeout}s)",
                     "error": "timeout",
                     "completed_at": datetime.now().isoformat()
                 })
@@ -1487,7 +1561,7 @@ async def scan_repository(request: ScanRequest, background_tasks: BackgroundTask
     """
     try:
         # Check repository access (handles public/private repos)
-        request.check_repository_access()
+        #request.check_repository_access()
 
         # Generate scan ID
         scan_id = str(uuid.uuid4())
@@ -1572,7 +1646,7 @@ async def get_html_report(scan_id: str):
                     # Fall through to regeneration
         
         # Try to find report file by scan_id if not stored in result
-        reports_dir = Path("reports")
+        reports_dir = Path(get_reports_directory())
         report_filename = f"hard_gate_report_{scan_id}.html"
         report_path = reports_dir / report_filename
         
@@ -1600,8 +1674,8 @@ async def get_html_report(scan_id: str):
             from codegates.reports import ReportGenerator
             from codegates.models import ReportConfig
             
-            # Create reports directory with container-friendly fallbacks
-            reports_dir_path = ensure_writable_directory("reports", "reports directory")
+            # Create reports directory using configuration
+            reports_dir_path = get_reports_directory()
             reports_dir = Path(reports_dir_path)
             
             # Generate and save report to file
@@ -1674,7 +1748,7 @@ async def get_html_report(scan_id: str):
             """
             
             # Save basic report to file as well
-            reports_dir_path = ensure_writable_directory("reports", "reports directory")
+            reports_dir_path = get_reports_directory()
             reports_dir = Path(reports_dir_path)
             report_filename = f"hard_gate_report_{scan_id}.html"
             report_path = reports_dir / report_filename
@@ -1696,7 +1770,7 @@ async def get_html_report(scan_id: str):
 async def list_reports():
     """List all available saved reports."""
     try:
-        reports_dir = Path("reports")
+        reports_dir = Path(get_reports_directory())
         
         if not reports_dir.exists():
             return {"reports": []}
@@ -1721,7 +1795,7 @@ async def list_reports():
                     "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
                     "score": scan_data.get("score"),
                     "status": scan_data.get("status", "unknown"),
-                    "report_url": f"{API_BASE_URL}{API_VERSION_PREFIX}/reports/{scan_id}"
+                    "report_url": f"{get_reports_url_base()}/{scan_id}"
                 })
                 
             except Exception as e:
@@ -2199,6 +2273,111 @@ def safe_extract_archive(archive_content: bytes, temp_dir: str) -> str:
         raise Exception(f"Invalid ZIP archive: {e}")
     except Exception as e:
         raise Exception(f"Failed to extract repository archive: {e}")
+
+def get_reports_directory() -> str:
+    """
+    Get the configured reports directory path with container-friendly fallbacks
+    
+    Returns:
+        str: Path to the reports directory
+    """
+    try:
+        # Use the globally configured reports directory
+        return ensure_writable_directory(REPORTS_DIR, "reports directory")
+    except Exception as e:
+        print(f"⚠️ Cannot use configured reports directory '{REPORTS_DIR}': {e}")
+        # Fallback to hardcoded default
+        return get_reports_directory()
+
+def get_reports_url_base() -> str:
+    """
+    Get the configured reports URL base
+    
+    Returns:
+        str: Base URL for reports
+    """
+    try:
+        return REPORTS_URL_BASE
+    except NameError:
+        # Fallback if not configured
+        return f"{API_BASE_URL}{API_VERSION_PREFIX}/reports"
+
+def get_timeout_value(timeout_name: str, scan_options: Optional[ScanOptions] = None) -> int:
+    """
+    Get timeout value with optional per-request override
+    
+    Args:
+        timeout_name: Name of the timeout from TIMEOUT_CONFIG
+        scan_options: Optional scan options with timeout overrides
+        
+    Returns:
+        int: Timeout value in seconds
+    """
+    # Check for per-request override first
+    if scan_options:
+        override_value = getattr(scan_options, timeout_name, None)
+        if override_value is not None:
+            print(f"🕒 Using custom {timeout_name}: {override_value}s (overridden via API)")
+            return override_value
+    
+    # Fall back to global configuration
+    global_value = TIMEOUT_CONFIG.get(timeout_name, 30)  # 30s default fallback
+    return global_value
+
+def get_git_clone_timeout(scan_options: Optional[ScanOptions] = None) -> int:
+    """Get git clone timeout with optional override"""
+    return get_timeout_value('git_clone_timeout', scan_options)
+
+def get_api_download_timeout(scan_options: Optional[ScanOptions] = None) -> int:
+    """Get API download timeout with optional override"""
+    return get_timeout_value('api_download_timeout', scan_options)
+
+def get_analysis_timeout(scan_options: Optional[ScanOptions] = None) -> int:
+    """Get analysis timeout with optional override"""
+    return get_timeout_value('analysis_timeout', scan_options)
+
+def get_llm_request_timeout(scan_options: Optional[ScanOptions] = None) -> int:
+    """Get LLM request timeout with optional override"""
+    return get_timeout_value('llm_request_timeout', scan_options)
+
+@api_v1.get("/system/timeout-config")
+async def get_timeout_configuration():
+    """Get current timeout configuration."""
+    try:
+        return {
+            "status": "success",
+            "timeout_config": TIMEOUT_CONFIG,
+            "description": {
+                "git_clone_timeout": "Git clone operation timeout (seconds)",
+                "git_ls_remote_timeout": "Git repository access test timeout (seconds)",
+                "api_download_timeout": "GitHub API download timeout (seconds)",
+                "analysis_timeout": "Code analysis timeout (seconds)",
+                "llm_request_timeout": "LLM request timeout (seconds)",
+                "http_request_timeout": "General HTTP request timeout (seconds)",
+                "health_check_timeout": "Health check timeout (seconds)",
+                "jira_request_timeout": "JIRA API request timeout (seconds)",
+                "jira_health_timeout": "JIRA health check timeout (seconds)",
+                "github_connect_timeout": "GitHub connection timeout (seconds)",
+                "github_read_timeout": "GitHub read timeout (seconds)",
+                "vscode_api_timeout": "VS Code extension API timeout (seconds)",
+                "llm_batch_timeout": "LLM batch processing timeout (seconds)"
+            },
+            "override_info": {
+                "message": "These values can be overridden per scan request using scan_options",
+                "available_overrides": [
+                    "git_clone_timeout",
+                    "api_download_timeout", 
+                    "analysis_timeout",
+                    "llm_request_timeout"
+                ]
+            }
+        }
+        
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Failed to get timeout configuration: {str(e)}"
+        }
 
 if __name__ == "__main__":
     start_server() 

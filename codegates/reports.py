@@ -61,18 +61,19 @@ class SharedReportGenerator:
     
     @staticmethod
     def calculate_summary_stats(result_data: Dict[str, Any]) -> Dict[str, int]:
-        """Calculate summary statistics - with logical consistency fix for violations"""
+        """Calculate summary statistics - exact same logic as VS Code extension with logical consistency fixes"""
         gates = result_data.get("gates", [])
         
-        # Count gates with logical consistency fixes
+        # Calculate stats with fixed logical consistency - exact same as extension
+        total_gates = len(gates)
         implemented_gates = 0
         partial_gates = 0
         not_implemented_gates = 0
-        not_applicable_gates = 0
         
+        # Apply same logical consistency fixes as extension
         for gate in gates:
-            status = gate.get("status")
             found = gate.get("found", 0)
+            status = gate.get("status")
             
             # Apply logical consistency fixes
             if found > 0 and gate.get("name") == 'avoid_logging_secrets':
@@ -87,19 +88,16 @@ class SharedReportGenerator:
                 partial_gates += 1
             elif status in ['FAIL', 'FAILED']:
                 not_implemented_gates += 1
-            elif status == 'NOT_APPLICABLE':
-                not_applicable_gates += 1
             else:
                 # Default fallback
                 not_implemented_gates += 1
         
         return {
-            "total_gates": len(gates),
+            "total_gates": total_gates,
             "implemented_gates": implemented_gates,
             "partial_gates": partial_gates,
             "not_implemented_gates": not_implemented_gates,
-            # Note: VS Code extension calculates but doesn't display notApplicableGates
-            "not_applicable_gates": not_applicable_gates
+            "not_applicable_gates": 0  # Not used in extension
         }
     
     @staticmethod
@@ -131,12 +129,12 @@ class SharedReportGenerator:
     
     @staticmethod
     def analyze_secrets(result_data: Dict[str, Any]) -> Dict[str, str]:
-        """Analyze secrets - with logical consistency fix for violations"""
+        """Analyze secrets - exact same logic as VS Code extension"""
         gates = result_data.get("gates", [])
         secrets_gate = next((g for g in gates if g.get("name") == 'avoid_logging_secrets'), None)
         
         if secrets_gate:
-            # Prioritize violations over status for logical consistency
+            # Simple status-based logic like VS Code extension
             if secrets_gate.get("found", 0) > 0:
                 return {
                     'status': 'warning',
@@ -202,14 +200,15 @@ class SharedReportGenerator:
     
     @staticmethod
     def get_status_info(status: str, gate: Dict[str, Any] = None) -> Dict[str, str]:
-        """Get status info - with logical consistency fix for violations"""
-        # Fix logical inconsistency: if there are violations, show as warning/fail regardless of status
-        if gate and gate.get("found", 0) > 0:
-            # Special handling for avoid_logging_secrets gate - violations should override PASS status
-            if gate.get("name") == 'avoid_logging_secrets':
+        """Get status info - exact same logic as VS Code extension with logical consistency fixes"""
+        # Apply logical consistency fixes for status display - exact same as extension
+        if gate:
+            found = gate.get("found", 0)
+            
+            # Fix logical inconsistency: if there are violations, show as warning/fail regardless of status
+            if found > 0 and gate.get("name") == 'avoid_logging_secrets':
                 return {'class': 'not-implemented', 'text': '✗ Violations Found'}
-            # For other gates, violations indicate partial implementation
-            elif status == 'PASS':
+            elif found > 0 and status == 'PASS':
                 return {'class': 'partial', 'text': '⚬ Has Issues'}
         
         # Default status mapping
@@ -228,63 +227,22 @@ class SharedReportGenerator:
         if gate.get("status") == 'NOT_APPLICABLE':
             return 'Not applicable to this project type'
         
-        details = gate.get("details", [])
-        if not details or len(details) == 0:
+        found = gate.get("found", 0)
+        coverage = gate.get("coverage", 0)
+        
+        if found > 0:
+            return f"Found {found} implementations with {coverage:.1f}% coverage"
+        else:
             return 'No relevant patterns found in codebase'
-        
-        # Process details to avoid duplication (same logic as VS Code extension)
-        processed_details = []
-        seen_content = set()
-        
-        for detail in details[:3]:  # First 3 details
-            # Skip if we've seen this content before (avoid duplicates)
-            clean_detail = str(detail).strip().lower()
-            if clean_detail not in seen_content and len(str(detail)) > 5:
-                seen_content.add(clean_detail)
-                processed_details.append(str(detail))
-        
-        # If we have basic statistics, show them first
-        evidence = ''
-        found = gate.get("found")
-        expected = gate.get("expected")
-        coverage = gate.get("coverage")
-        
-        if found is not None and expected is not None and coverage is not None:
-            if found > 0:
-                evidence = f"Found {found} implementations with {coverage:.1f}% coverage"
-            else:
-                evidence = 'No relevant patterns found in codebase'
-        
-        # Add processed details if they provide additional value
-        if processed_details:
-            # Check if details provide more than just the basic "no patterns found" message
-            meaningful_details = [detail for detail in processed_details if 
-                not detail.lower().startswith('no') and 
-                'not found' not in detail.lower() and
-                len(detail) > 20  # Filter out very short, likely redundant details
-            ]
-            
-            if meaningful_details:
-                if evidence:
-                    evidence += '<br>' + '<br>'.join(meaningful_details)
-                else:
-                    evidence = '<br>'.join(meaningful_details)
-            elif not evidence:
-                # Fall back to the first detail if no meaningful details and no basic stats
-                evidence = processed_details[0] if processed_details else 'No relevant patterns found in codebase'
-        elif not evidence:
-            # Final fallback
-            evidence = 'No relevant patterns found in codebase'
-        
-        return evidence
     
     @staticmethod
     def get_recommendation(gate: Dict[str, Any], gate_name: str) -> str:
-        """Get recommendation - with logical consistency fix for violations"""
+        """Get recommendation - exact same logic as VS Code extension with logical consistency fixes"""
+        found = gate.get("found", 0)
         status = gate.get("status")
         
-        # Fix logical inconsistency: if there are violations, recommend fixing them
-        if gate.get("found", 0) > 0:
+        # Fix logical inconsistency: if there are violations, recommend fixing them - exact same as extension
+        if found > 0:
             if gate.get("name") == 'avoid_logging_secrets':
                 return f"Fix confidential data logging violations in {gate_name.lower()}"
             elif status == 'PASS':
@@ -385,11 +343,8 @@ class ReportGenerator:
         # Get current timestamp
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
-        # Generate technology stack using shared logic
-        tech_stack = SharedReportGenerator.generate_tech_stack(result_data)
-        
-        # Analyze secrets using shared logic
-        secrets_analysis = SharedReportGenerator.analyze_secrets(result_data)
+        # Count comments if provided
+        comments_count = len(comments) if comments else 0
         
         html_template = f"""<!DOCTYPE html>
 <html lang="en">
@@ -398,13 +353,13 @@ class ReportGenerator:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hard Gate Assessment - {project_name}</title>
     <style>
-        {self._get_css_styles()}
+        {self._get_extension_css_styles()}
     </style>
 </head>
 <body>
     <div class="report-container">
         <h1>{project_name}</h1>
-        <p style="color: #2563eb; margin-bottom: 30px; font-weight: 500;">Hard Gate Assessment Report</p>
+        <p style="color: #2563eb; margin-bottom: 30px; font-weight: 500;">Hard Gate Assessment Report{(' (with ' + str(comments_count) + ' user comments)') if comments_count > 0 else ''}</p>
         
         <h2>Executive Summary</h2>
         
@@ -433,14 +388,12 @@ class ReportGenerator:
         </div>
         <p><strong>{result_data['score']:.1f}% Hard Gates Compliance</strong></p>
         
-        {self._generate_technology_section_html(tech_stack)}
-        
-        {self._generate_secrets_section_html(secrets_analysis)}
-        
-        {self._generate_gates_section_html(result_data, comments)}
+        <h2>Hard Gates Analysis</h2>
+        {self._generate_simple_gates_table_html(result_data, comments)}
         
         <footer style="margin-top: 50px; text-align: center; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 20px;">
             <p>Hard Gate Assessment Report generated on {timestamp}</p>
+            {('<p style="font-size: 0.9em; color: #9ca3af;">Report includes ' + str(comments_count) + ' user comments for enhanced documentation</p>') if comments_count > 0 else ''}
         </footer>
     </div>
 </body>
@@ -448,151 +401,27 @@ class ReportGenerator:
         
         return html_template
     
-    def _get_css_styles(self) -> str:
-        """Get CSS styles for HTML report"""
+    def _get_extension_css_styles(self) -> str:
+        """Get CSS styles that exactly match VS Code extension"""
         return """
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            line-height: 1.6;
-            color: #374151;
-            max-width: 900px;
-            margin: 0 auto;
-            padding: 20px;
-            background: #f3f4f6;
-        }
-        
-        h1 {
-            font-size: 2em;
-            color: #1f2937;
-            border-bottom: 3px solid #2563eb;
-            padding-bottom: 15px;
-            margin-bottom: 30px;
-        }
-        
-        h2 {
-            color: #1f2937;
-            border-bottom: 2px solid #e5e7eb;
-            padding-bottom: 10px;
-            margin-top: 40px;
-        }
-        
-        h3 {
-            color: #374151;
-            margin-top: 30px;
-        }
-        
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-            background: #fff;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
-            border: 1px solid #e5e7eb;
-        }
-        
-        th, td {
-            padding: 12px 15px;
-            text-align: left;
-            border-bottom: 1px solid #e5e7eb;
-        }
-        
-        th {
-            background: #2563eb;
-            color: #fff;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-        }
-        
-        tr:hover {
-            background: #f9fafb;
-        }
-        
-        .status-implemented {
-            color: #059669;
-            background: #ecfdf5;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-weight: 500;
-        }
-        
-        .status-partial {
-            color: #d97706;
-            background: #fffbeb;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-weight: 500;
-        }
-        
-        .status-not-implemented {
-            color: #dc2626;
-            background: #fef2f2;
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-weight: 500;
-        }
-        
-        .summary-stats {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin: 30px 0;
-        }
-        
-        .stat-card {
-            background: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            border: 1px solid #e5e7eb;
-            text-align: center;
-        }
-        
-        .stat-number {
-            font-size: 2em;
-            font-weight: bold;
-            color: #2563eb;
-        }
-        
-        .stat-label {
-            color: #6b7280;
-            margin-top: 5px;
-        }
-        
-        .compliance-bar {
-            width: 100%;
-            height: 20px;
-            background: #e5e7eb;
-            border-radius: 10px;
-            overflow: hidden;
-            margin: 10px 0;
-        }
-        
-        .compliance-fill {
-            height: 100%;
-            background: linear-gradient(90deg, #dc2626 0%, #d97706 50%, #059669 100%);
-            transition: width 0.3s ease;
-        }
-        
-        .secrets-safe {
-            color: #059669;
-            background: #ecfdf5;
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid #059669;
-            margin: 10px 0;
-        }
-        
-        .secrets-warning {
-            color: #d97706;
-            background: #fffbeb;
-            padding: 15px;
-            border-radius: 8px;
-            border-left: 4px solid #d97706;
-            margin: 10px 0;
-        }
-        
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; line-height: 1.6; color: #374151; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f3f4f6; }
+        h1 { font-size: 2em; color: #1f2937; border-bottom: 3px solid #2563eb; padding-bottom: 15px; margin-bottom: 30px; }
+        h2 { color: #1f2937; border-bottom: 2px solid #e5e7eb; padding-bottom: 10px; margin-top: 40px; }
+        h3 { color: #374151; margin-top: 30px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1); border: 1px solid #e5e7eb; }
+        th, td { padding: 12px 15px; text-align: left; border-bottom: 1px solid #e5e7eb; }
+        th { background: #2563eb; color: #fff; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+        tr:hover { background: #f9fafb; }
+        .status-implemented { color: #059669; background: #ecfdf5; padding: 4px 8px; border-radius: 4px; font-weight: 500; }
+        .status-partial { color: #d97706; background: #fffbeb; padding: 4px 8px; border-radius: 4px; font-weight: 500; }
+        .status-not-implemented { color: #dc2626; background: #fef2f2; padding: 4px 8px; border-radius: 4px; font-weight: 500; }
+        .summary-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 30px 0; }
+        .stat-card { background: #fff; padding: 20px; border-radius: 8px; border: 1px solid #e5e7eb; text-align: center; }
+        .stat-number { font-size: 2em; font-weight: bold; color: #2563eb; }
+        .stat-label { color: #6b7280; margin-top: 5px; }
+        .compliance-bar { width: 100%; height: 20px; background: #e5e7eb; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+        .compliance-fill { height: 100%; background: linear-gradient(90deg, #dc2626 0%, #d97706 50%, #059669 100%); transition: width 0.3s ease; }
+        .comment-cell { font-style: italic; color: #6b7280; max-width: 250px; word-wrap: break-word; background: #f9fafb; }
         .secrets-unknown {
             color: #6b7280;
             background: #f9fafb;
@@ -603,71 +432,12 @@ class ReportGenerator:
         }
         """
     
-    def _generate_technology_section_html(self, tech_stack: List[Dict[str, str]]) -> str:
-        """Generate technology section HTML using shared logic"""
-        if not tech_stack:
-            return ""
-        
-        rows = ""
-        for tech in tech_stack:
-            rows += f"""
-                        <tr>
-                            <td><strong>{tech['type']}</strong></td>
-                            <td>{tech['name']}</td>
-                            <td>{tech['version']}</td>
-                            <td>{tech['purpose']}</td>
-                        </tr>"""
-        
-        return f"""
-        <div class="technology-stack">
-            <h2>Technology Stack</h2>
-            <table class="tech-table">
-                <thead>
-                    <tr>
-                        <th>Type</th>
-                        <th>Name</th>
-                        <th>Version</th>
-                        <th>Purpose</th>
-                    </tr>
-                </thead>
-                <tbody>{rows}
-                </tbody>
-            </table>
-        </div>"""
-    
-    def _generate_secrets_section_html(self, secrets_analysis: Dict[str, str]) -> str:
-        """Generate secrets section HTML using shared logic"""
-        if secrets_analysis['status'] == 'safe':
-            return f"""
-        <div class="secrets-analysis">
-            <h2>Secrets Analysis</h2>
-            <p class="secrets-safe">
-                <strong>✅ {secrets_analysis['message']}</strong> in the analyzed codebase.
-            </p>
-        </div>"""
-        elif secrets_analysis['status'] == 'warning':
-            return f"""
-        <div class="secrets-analysis">
-            <h2>Secrets Analysis</h2>
-            <p class="secrets-warning">
-                <strong>⚠️ {secrets_analysis['message']}</strong>
-            </p>
-        </div>"""
-        else:
-            return f"""
-        <div class="secrets-analysis">
-            <h2>Secrets Analysis</h2>
-            <p class="secrets-unknown">
-                <strong>ℹ️ {secrets_analysis['message']}</strong>
-            </p>
-        </div>"""
-    
-    def _generate_gates_section_html(self, result_data: Dict[str, Any], comments: Dict[str, str] = None) -> str:
-        """Generate gates section HTML using shared logic with comments support"""
+    def _generate_simple_gates_table_html(self, result_data: Dict[str, Any], comments: Dict[str, str] = None) -> str:
+        """Generate gates table HTML that exactly matches VS Code extension structure"""
         gates = result_data.get("gates", [])
         gate_categories = SharedReportGenerator.get_gate_categories()
         
-        sections = ""
+        html = ""
         
         for category_name, gate_names in gate_categories.items():
             category_gates = [g for g in gates if g.get("name") in gate_names]
@@ -675,47 +445,52 @@ class ReportGenerator:
             if not category_gates:
                 continue
             
-            rows = ""
+            html += f"""
+                <div class="gate-category">
+                    <h3>{category_name}</h3>
+                    <table class="gates-table">
+                        <thead>
+                            <tr>
+                                <th>Practice</th>
+                                <th>Status</th>
+                                <th>Evidence</th>
+                                <th>Recommendation</th>"""
+            
+            # Add Comments column only if comments are provided
+            if comments:
+                html += """
+                                <th>Comments</th>"""
+            
+            html += """
+                            </tr>
+                        </thead>
+                        <tbody>"""
+            
             for gate in category_gates:
                 gate_name = SharedReportGenerator.format_gate_name(gate.get("name", ""))
                 status_info = SharedReportGenerator.get_status_info(gate.get("status", ""), gate)
                 evidence = SharedReportGenerator.format_evidence(gate)
                 recommendation = SharedReportGenerator.get_recommendation(gate, gate_name)
-                comment = SharedReportGenerator.get_gate_comment(gate.get("name", ""), comments)
+                comment = SharedReportGenerator.get_gate_comment(gate.get("name", ""), comments) if comments else ""
                 
-                rows += f"""
-                        <tr>
-                            <td><strong>{gate_name}</strong></td>
-                            <td><span class="status-{status_info['class']}">{status_info['text']}</span></td>
-                            <td>{evidence}</td>
-                            <td>{recommendation}</td>
-                            <td style="font-style: italic; color: #6b7280;">{comment if comment else 'No comments'}</td>
-                        </tr>"""
+                html += f"""
+                            <tr>
+                                <td><strong>{gate_name}</strong></td>
+                                <td><span class="status-{status_info['class']}">{status_info['text']}</span></td>
+                                <td>{evidence}</td>
+                                <td>{recommendation}</td>"""
+                
+                # Add comment cell only if comments are provided
+                if comments:
+                    html += f"""
+                                <td class="comment-cell">{comment if comment else 'No comments'}</td>"""
+                
+                html += """
+                            </tr>"""
             
-            if rows:
-                sections += f"""
-            <div class="gate-category">
-                <h3>{category_name}</h3>
-                <table class="gates-table">
-                    <thead>
-                        <tr>
-                            <th>Practice</th>
-                            <th>Status</th>
-                            <th>Evidence</th>
-                            <th>Recommendation</th>
-                            <th>Comments</th>
-                        </tr>
-                    </thead>
-                    <tbody>{rows}
-                    </tbody>
-                </table>
-            </div>"""
+            html += """
+                        </tbody>
+                    </table>
+                </div>"""
         
-        if sections:
-            return f"""
-        <div class="gates-analysis">
-            <h2>Hard Gates Analysis</h2>
-            {sections}
-        </div>"""
-        else:
-            return "" 
+        return html 

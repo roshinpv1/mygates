@@ -6,6 +6,7 @@ from typing import List, Dict, Optional, Any, Union
 from enum import Enum
 from pydantic import BaseModel, Field, field_validator, computed_field
 from datetime import datetime
+import os
 
 
 class Language(str, Enum):
@@ -159,7 +160,7 @@ class ValidationResult(BaseModel):
 class ReportConfig(BaseModel):
     """Configuration for report generation"""
     format: str = Field(default="json", description="Output format: json, html, pdf, excel")
-    output_path: str = Field(default="./reports", description="Output directory")
+    output_path: str = Field(default_factory=lambda: os.getenv('CODEGATES_REPORTS_DIR', './reports'), description="Output directory")
     include_details: bool = Field(default=True, description="Include detailed analysis")
     include_recommendations: bool = Field(default=True, description="Include recommendations")
     template: Optional[str] = Field(default=None, description="Custom template path")

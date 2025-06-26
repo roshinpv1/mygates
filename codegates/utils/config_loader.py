@@ -124,13 +124,45 @@ class ConfigLoader:
             'redoc_url': self.get('CODEGATES_API_REDOC_URL', '/redoc'),
         }
     
+    def get_timeout_config(self) -> Dict[str, Any]:
+        """Get timeout configuration for all operations"""
+        return {
+            # Repository operations
+            'git_clone_timeout': self.get_int('CODEGATES_GIT_CLONE_TIMEOUT', 300),  # 5 minutes
+            'git_ls_remote_timeout': self.get_int('CODEGATES_GIT_LS_REMOTE_TIMEOUT', 30),  # 30 seconds
+            'api_download_timeout': self.get_int('CODEGATES_API_DOWNLOAD_TIMEOUT', 120),  # 2 minutes
+            
+            # Analysis operations
+            'analysis_timeout': self.get_int('CODEGATES_ANALYSIS_TIMEOUT', 180),  # 3 minutes
+            'llm_request_timeout': self.get_int('CODEGATES_LLM_REQUEST_TIMEOUT', 30),  # 30 seconds
+            
+            # HTTP operations
+            'http_request_timeout': self.get_int('CODEGATES_HTTP_REQUEST_TIMEOUT', 10),  # 10 seconds
+            'health_check_timeout': self.get_int('CODEGATES_HEALTH_CHECK_TIMEOUT', 5),  # 5 seconds
+            
+            # JIRA integration
+            'jira_request_timeout': self.get_int('CODEGATES_JIRA_REQUEST_TIMEOUT', 30),  # 30 seconds
+            'jira_health_timeout': self.get_int('CODEGATES_JIRA_HEALTH_TIMEOUT', 10),  # 10 seconds
+            
+            # GitHub Enterprise
+            'github_connect_timeout': self.get_int('CODEGATES_GITHUB_CONNECT_TIMEOUT', 30),  # 30 seconds
+            'github_read_timeout': self.get_int('CODEGATES_GITHUB_READ_TIMEOUT', 120),  # 2 minutes
+            
+            # VS Code extension
+            'vscode_api_timeout': self.get_int('CODEGATES_VSCODE_API_TIMEOUT', 300),  # 5 minutes
+            
+            # LLM batch processing
+            'llm_batch_timeout': self.get_int('CODEGATES_LLM_BATCH_TIMEOUT', 30),  # 30 seconds per request
+        }
+    
     def get_git_config(self) -> Dict[str, Any]:
         """Get Git and repository checkout configuration"""
+        timeout_config = self.get_timeout_config()
         return {
             'prefer_api_checkout': self.get_boolean('CODEGATES_PREFER_API_CHECKOUT', False),
             'enable_api_fallback': self.get_boolean('CODEGATES_ENABLE_API_FALLBACK', True),
-            'git_timeout': self.get_int('CODEGATES_GIT_TIMEOUT', 300),
-            'api_timeout': self.get_int('CODEGATES_API_TIMEOUT', 120),
+            'git_timeout': timeout_config['git_clone_timeout'],  # Use timeout config
+            'api_timeout': timeout_config['api_download_timeout'],  # Use timeout config
             'max_repo_size': self.get_int('CODEGATES_MAX_REPO_SIZE', 100),  # MB
         }
     
@@ -247,6 +279,7 @@ class ConfigLoader:
             'llm': self.get_llm_config(),
             'ssl': self.get_ssl_config(),
             'github_enterprise': self.get_github_enterprise_config(),
+            'timeouts': self.get_timeout_config(),
         }
     
     def validate_config(self) -> List[str]:

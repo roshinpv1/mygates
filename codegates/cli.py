@@ -24,6 +24,7 @@ from codegates.core.llm_analyzer import LLMConfig, LLMProvider, LLMIntegrationMa
 from codegates.utils.env_loader import EnvironmentLoader
 from codegates.api.services.github import GitHubService
 from codegates.api.utils import validate_github_token, validate_github_url
+from codegates.utils.config_loader import get_config
 
 console = Console()
 
@@ -474,9 +475,20 @@ def reports():
     pass
 
 
+def get_reports_directory_default() -> str:
+    """Get the default reports directory from environment configuration"""
+    try:
+        config = get_config()
+        reports_config = config.get_reports_config()
+        return reports_config['reports_dir']
+    except Exception:
+        # Fallback to environment variable or default
+        return os.getenv('CODEGATES_REPORTS_DIR', 'reports')
+
+
 @reports.command()
-@click.option('--reports-dir', default='reports', type=click.Path(), 
-              help='Reports directory (default: reports)')
+@click.option('--reports-dir', default=get_reports_directory_default(), type=click.Path(), 
+              help=f'Reports directory (default: {get_reports_directory_default()})')
 def list(reports_dir):
     """List all saved HTML reports"""
     
@@ -525,8 +537,8 @@ def list(reports_dir):
 
 @reports.command()
 @click.argument('scan_id')
-@click.option('--reports-dir', default='reports', type=click.Path(), 
-              help='Reports directory (default: reports)')
+@click.option('--reports-dir', default=get_reports_directory_default(), type=click.Path(), 
+              help=f'Reports directory (default: {get_reports_directory_default()})')
 def show(scan_id, reports_dir):
     """Show report file path for a specific scan ID"""
     
@@ -546,8 +558,8 @@ def show(scan_id, reports_dir):
 
 
 @reports.command()
-@click.option('--reports-dir', default='reports', type=click.Path(), 
-              help='Reports directory (default: reports)')
+@click.option('--reports-dir', default=get_reports_directory_default(), type=click.Path(), 
+              help=f'Reports directory (default: {get_reports_directory_default()})')
 @click.option('--older-than', type=int, help='Delete reports older than N days')
 @click.option('--all', 'delete_all', is_flag=True, help='Delete all reports')
 @click.confirmation_option(prompt='Are you sure you want to delete reports?')
