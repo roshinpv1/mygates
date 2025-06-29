@@ -62,7 +62,7 @@ class ApiRunner {
             }
         });
     }
-    async makeHttpRequest(method, endpoint, data, customTimeout) {
+    async makeHttpRequest(method, endpoint, data, customTimeout, expectHtml) {
         const config = this.getApiConfig();
         const fullUrl = `${config.baseUrl}${endpoint}`;
         const urlParts = new URL(fullUrl);
@@ -91,14 +91,30 @@ class ApiRunner {
                 });
                 res.on('end', () => {
                     try {
-                        const parsedData = responseData ? JSON.parse(responseData) : {};
+                        let parsedData;
+                        // If we expect HTML or the response is HTML, don't try to parse as JSON
+                        if (expectHtml || responseData.trim().startsWith('<!DOCTYPE') || responseData.trim().startsWith('<html')) {
+                            parsedData = responseData; // Return raw HTML
+                        }
+                        else {
+                            parsedData = responseData ? JSON.parse(responseData) : {};
+                        }
                         resolve({
                             statusCode: res.statusCode || 0,
                             data: parsedData
                         });
                     }
                     catch (parseError) {
-                        reject(new Error(`Failed to parse response: ${parseError}`));
+                        // If JSON parsing fails but we have HTML content, return it as-is
+                        if (responseData.trim().startsWith('<!DOCTYPE') || responseData.trim().startsWith('<html')) {
+                            resolve({
+                                statusCode: res.statusCode || 0,
+                                data: responseData
+                            });
+                        }
+                        else {
+                            reject(new Error(`Failed to parse response: ${parseError}`));
+                        }
                     }
                 });
             });
@@ -257,6 +273,49 @@ class ApiRunner {
         }
         catch (error) {
             throw new Error(`Failed to get scan status: ${this.getErrorMessage(error)}`);
+        }
+    }
+    async getHtmlReport(scanId, comments) {
+        try {
+            let url = `/reports/${scanId}`;
+            // Add comments as query parameter if provided
+            if (comments && Object.keys(comments).length > 0) {
+                const commentsJson = JSON.stringify(comments);
+                url += `?comments=${encodeURIComponent(commentsJson)}`;
+            }
+            const response = await this.makeHttpRequest('GET', url, undefined, 30000, true); // 30 second timeout for HTML generation
+            if (response.statusCode !== 200) {
+                throw new Error(`Failed to get HTML report: HTTP ${response.statusCode}`);
+            }
+            // Response should be HTML content
+            if (typeof response.data === 'string') {
+                return response.data;
+            }
+            else {
+                // Handle case where response might be parsed as JSON
+                return response.data.toString();
+            }
+        }
+        catch (error) {
+            console.error('Get HTML report error:', error);
+            throw new Error(`Failed to fetch HTML report: ${this.getErrorMessage(error)}`);
+        }
+    }
+    async updateReportComments(scanId, comments) {
+        try {
+            const response = await this.makeHttpRequest('POST', `/reports/${scanId}/comments`, comments);
+            if (response.statusCode !== 200) {
+                const errorData = response.data;
+                if (errorData?.detail) {
+                    throw new Error(errorData.detail);
+                }
+                throw new Error(`Failed to update comments: HTTP ${response.statusCode}`);
+            }
+            console.log('Comments updated successfully:', response.data);
+        }
+        catch (error) {
+            console.error('Update report comments error:', error);
+            throw new Error(`Failed to update report comments: ${this.getErrorMessage(error)}`);
         }
     }
     transformApiResult(apiResult) {

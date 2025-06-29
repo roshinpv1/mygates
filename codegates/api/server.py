@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Body, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Body, BackgroundTasks, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -26,6 +26,7 @@ import time
 import ssl
 import urllib3
 from urllib3.exceptions import InsecureRequestWarning
+import hashlib
 
 # Load environment variables first
 import sys
@@ -1652,8 +1653,8 @@ async def get_scan_status(scan_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 @api_v1.get("/reports/{scan_id}")
-async def get_html_report(scan_id: str):
-    """Generate and return HTML report for a scan."""
+async def get_html_report(scan_id: str, comments: Optional[str] = Query(None, description="JSON string of comments")):
+    """Generate and return HTML report for a scan with optional comments."""
     try:
         if scan_id not in scan_results:
             raise HTTPException(status_code=404, detail="Scan not found")
@@ -1663,8 +1664,22 @@ async def get_html_report(scan_id: str):
         if result["status"] != "completed":
             raise HTTPException(status_code=400, detail="Scan not completed yet")
         
-        # First, try to serve from saved file
-        if "report_file" in result:
+        # Parse comments if provided
+        parsed_comments = {}
+        if comments:
+            try:
+                parsed_comments = json.loads(comments)
+            except json.JSONDecodeError:
+                print(f"⚠️ Invalid comments JSON format, ignoring comments")
+                parsed_comments = {}
+        
+        # Check for stored comments in scan result
+        stored_comments = result.get("comments", {})
+        if stored_comments:
+            parsed_comments.update(stored_comments)
+        
+        # First, try to serve from saved file if no comments or comments match
+        if not parsed_comments and "report_file" in result:
             report_path = Path(result["report_file"])
             if report_path.exists():
                 try:
@@ -1681,7 +1696,8 @@ async def get_html_report(scan_id: str):
         report_filename = f"hard_gate_report_{scan_id}.html"
         report_path = reports_dir / report_filename
         
-        if report_path.exists():
+        # If no comments and file exists, serve it
+        if not parsed_comments and report_path.exists():
             try:
                 with open(report_path, 'r', encoding='utf-8') as f:
                     html_content = f.read()
@@ -1691,8 +1707,8 @@ async def get_html_report(scan_id: str):
                 print(f"⚠️ Failed to read report file: {file_error}")
                 # Fall through to regeneration
         
-        # If no saved file exists, generate on-demand
-        print(f"📄 No saved report found for {scan_id}, generating on-demand...")
+        # Generate HTML report with comments (on-demand or with comments)
+        print(f"📄 Generating HTML report for {scan_id}" + (f" with {len(parsed_comments)} comments" if parsed_comments else ""))
         
         # Get the full validation result object
         validation_result = result.get("result_object")
@@ -1700,7 +1716,7 @@ async def get_html_report(scan_id: str):
         if not validation_result:
             raise HTTPException(status_code=500, detail="Report data not available")
         
-        # Generate HTML report
+        # Generate HTML report with comments
         try:
             from codegates.reports import ReportGenerator
             from codegates.models import ReportConfig
@@ -1708,10 +1724,7 @@ async def get_html_report(scan_id: str):
             # Create reports directory using configuration
             reports_dir_path = get_reports_directory()
             reports_dir = Path(reports_dir_path)
-            
-            # Generate and save report to file
-            report_filename = f"hard_gate_report_{scan_id}.html"
-            report_path = reports_dir / report_filename
+            reports_dir.mkdir(parents=True, exist_ok=True)
             
             # Create report config for HTML generation
             report_config = ReportConfig(
@@ -1721,16 +1734,28 @@ async def get_html_report(scan_id: str):
                 include_recommendations=True
             )
             
-            # Generate HTML report
+            # Generate HTML report with comments
             generator = ReportGenerator(report_config)
-            html_content = generator._generate_html_content(validation_result)
+            html_content = generator._generate_html_content(validation_result, parsed_comments)
             
-            # Save the HTML file
+            # Save the HTML file (with comments if provided)
+            if parsed_comments:
+                # Save with comments suffix for caching
+                comments_hash = hashlib.md5(json.dumps(parsed_comments, sort_keys=True).encode()).hexdigest()[:8]
+                report_filename = f"hard_gate_report_{scan_id}_{comments_hash}.html"
+            else:
+                report_filename = f"hard_gate_report_{scan_id}.html"
+            
+            report_path = reports_dir / report_filename
+            
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(html_content)
             
             print(f"📄 HTML report saved to: {report_path}")
-            scan_results[scan_id]["report_file"] = str(report_path)
+            
+            # Update scan result with report file path if no comments (main report)
+            if not parsed_comments:
+                scan_results[scan_id]["report_file"] = str(report_path)
             
             return HTMLResponse(content=html_content, status_code=200)
             
@@ -1750,6 +1775,14 @@ async def get_html_report(scan_id: str):
                 except Exception:
                     project_name = "Unknown Project"
             
+            # Generate basic HTML with comments
+            comments_html = ""
+            if parsed_comments:
+                comments_html = "<h2>Comments</h2><ul>"
+                for gate_name, comment in parsed_comments.items():
+                    comments_html += f"<li><strong>{gate_name}:</strong> {comment}</li>"
+                comments_html += "</ul>"
+            
             basic_html = f"""
             <!DOCTYPE html>
             <html>
@@ -1766,31 +1799,98 @@ async def get_html_report(scan_id: str):
             </head>
             <body>
                 <h1>{project_name}</h1>
-                <p style="color: #2563eb; margin-bottom: 30px; font-weight: 500;">Hard Gate Assessment Report</p>
+                <p style="color: #2563eb; margin-bottom: 30px; font-weight: 500;">Hard Gate Assessment Report{' (with comments)' if parsed_comments else ''}</p>
                 <div class="score">Overall Score: {result['score']:.1f}%</div>
                 <h2>Gate Results</h2>
                 {''.join([f'<div class="gate {gate["status"].lower()}"><strong>{gate["name"]}</strong>: {gate["status"]} ({gate["score"]:.1f}%)</div>' for gate in result["gates"]])}
                 <h2>Recommendations</h2>
                 <ul>
-                    {''.join([f'<li>{rec}</li>' for rec in result["recommendations"]])}
+                    {''.join([f'<li>{rec}</li>' for rec in result.get("recommendations", [])])}
                 </ul>
+                {comments_html}
             </body>
             </html>
             """
             
             # Save basic report to file as well
-            reports_dir_path = get_reports_directory()
-            reports_dir = Path(reports_dir_path)
-            report_filename = f"hard_gate_report_{scan_id}.html"
-            report_path = reports_dir / report_filename
-            
             with open(report_path, 'w', encoding='utf-8') as f:
                 f.write(basic_html)
             
             # Update scan result with report file path
-            scan_results[scan_id]["report_file"] = str(report_path)
+            if not parsed_comments:
+                scan_results[scan_id]["report_file"] = str(report_path)
             
             return HTMLResponse(content=basic_html, status_code=200)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_v1.post("/reports/{scan_id}/comments")
+async def update_report_comments(scan_id: str, comments: Dict[str, str]):
+    """Update report comments and regenerate HTML"""
+    try:
+        if scan_id not in scan_results:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        
+        result = scan_results[scan_id]
+        
+        if result["status"] != "completed":
+            raise HTTPException(status_code=400, detail="Scan not completed yet")
+        
+        # Store comments with scan result
+        scan_results[scan_id]["comments"] = comments
+        
+        # Get the validation result for regeneration
+        validation_result = result.get("result_object")
+        if not validation_result:
+            raise HTTPException(status_code=500, detail="Report data not available for regeneration")
+        
+        try:
+            from codegates.reports import ReportGenerator
+            from codegates.models import ReportConfig
+            
+            # Create reports directory
+            reports_dir_path = get_reports_directory()
+            reports_dir = Path(reports_dir_path)
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Generate HTML with comments
+            report_config = ReportConfig(
+                format='html',
+                output_path=str(reports_dir),
+                include_details=True,
+                include_recommendations=True
+            )
+            
+            generator = ReportGenerator(report_config)
+            html_content = generator._generate_html_content(validation_result, comments)
+            
+            # Save updated HTML file with comments
+            comments_hash = hashlib.md5(json.dumps(comments, sort_keys=True).encode()).hexdigest()[:8]
+            report_filename = f"hard_gate_report_{scan_id}_{comments_hash}.html"
+            report_path = reports_dir / report_filename
+            
+            with open(report_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            print(f"📄 HTML report with comments saved to: {report_path}")
+            
+            return {
+                "status": "success", 
+                "message": f"Comments updated and report regenerated with {len(comments)} comments",
+                "report_url": f"{get_reports_url_base()}/{scan_id}",
+                "comments_count": len(comments)
+            }
+            
+        except ImportError:
+            # Fallback if report generator not available
+            return {
+                "status": "success", 
+                "message": f"Comments stored (fallback mode) - {len(comments)} comments",
+                "comments_count": len(comments)
+            }
         
     except HTTPException:
         raise

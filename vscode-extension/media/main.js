@@ -56,6 +56,11 @@ window.addEventListener('message', event => {
             showResults(message.data);
             break;
             
+        case 'showResults':  // Handle the actual command sent by the extension
+            hideStatus();
+            showResults(message.data);
+            break;
+            
         case 'scanError':
             showStatus(message.data.error, 'error');
             hideResults();
@@ -99,56 +104,131 @@ function hideStatus() {
 
 function showResults(result) {
     const resultsEl = document.getElementById('results');
+    
+    // Make results div visible
     resultsEl.style.display = 'block';
     
-    // Calculate summary statistics
-    const totalGates = result.gates.length;
-    const implementedGates = result.gates.filter(g => g.status === 'PASS').length;
-    const partialGates = result.gates.filter(g => g.status === 'WARNING').length;
-    const notImplementedGates = result.gates.filter(g => g.status === 'FAIL' || g.status === 'FAILED').length;
-    const notApplicableGates = result.gates.filter(g => g.status === 'NOT_APPLICABLE').length;
-    
-    // Extract project name from repository URL if available
-    let projectName = 'Repository Scan Results';
-    if (result.repository_url) {
-        const urlParts = result.repository_url.split('/');
-        projectName = urlParts[urlParts.length - 1] || projectName;
+    // Check if we have server-generated HTML content
+    if (result.htmlContent) {
+        // Use server-generated HTML content directly
+        resultsEl.innerHTML = result.htmlContent;
+        
+        // Add comment functionality for the scan ID
+        if (result.scan_id) {
+            addCommentHandlers(result.scan_id);
+        }
+        
+        // Add generate report button if available
+        if (result.canGenerateReport) {
+            addGenerateReportButton(result);
+        }
+        
+        return;
     }
     
-    // Get current timestamp
-    const timestamp = new Date().toLocaleString();
+    // Fallback to client-side generation for backward compatibility
+    generateClientSideResults(result);
+}
+
+function addCommentHandlers(scanId) {
+    // Add event listeners for comment inputs
+    const commentInputs = document.querySelectorAll('.comment-input');
+    let commentUpdateTimeout;
     
-    // Generate technology stack (basic detection from available data)
-    const techStack = [];
-    if (result.languages_detected && result.languages_detected.length > 0) {
-        result.languages_detected.forEach(lang => {
-            techStack.push({
-                type: 'Languages',
-                name: lang.charAt(0).toUpperCase() + lang.slice(1),
-                version: 'N/A',
-                purpose: 'detected'
-            });
+    commentInputs.forEach(input => {
+        input.addEventListener('input', () => {
+            // Debounce comment updates to avoid too many server calls
+            clearTimeout(commentUpdateTimeout);
+            commentUpdateTimeout = setTimeout(() => {
+                const comments = collectComments();
+                vscode.postMessage({
+                    command: 'updateComments',
+                    data: { scanId, comments }
+                });
+            }, 1000); // Wait 1 second after user stops typing
         });
+    });
+}
+
+function collectComments() {
+    const comments = {};
+    const commentInputs = document.querySelectorAll('.comment-input');
+    
+    commentInputs.forEach(input => {
+        const gateName = input.getAttribute('data-gate');
+        const comment = input.value.trim();
+        if (gateName && comment) {
+            comments[gateName] = comment;
+        }
+    });
+    
+    return comments;
+}
+
+function addGenerateReportButton(result) {
+    // Find existing generate report button or create one
+    let generateBtn = document.getElementById('generateReportBtn');
+    
+    if (!generateBtn) {
+        // Create generate report button if it doesn't exist
+        const buttonContainer = document.createElement('div');
+        buttonContainer.className = 'report-link';
+        buttonContainer.style.cssText = 'margin-top: 30px; text-align: center;';
+        
+        generateBtn = document.createElement('button');
+        generateBtn.id = 'generateReportBtn';
+        generateBtn.className = 'detailed-report-link';
+        generateBtn.style.cssText = 'background: #2563eb; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; display: inline-block;';
+        generateBtn.textContent = '📊 Generate HTML Report';
+        
+        buttonContainer.appendChild(generateBtn);
+        document.getElementById('results').appendChild(buttonContainer);
     }
     
-    // Analyze secrets (basic check)
-    const secretsGate = result.gates.find(g => g.name === 'avoid_logging_secrets');
-    let secretsAnalysis = {
-        status: 'unknown',
-        message: 'Secrets analysis not available'
+    // Add click handler
+    generateBtn.onclick = () => {
+        const comments = collectComments();
+        vscode.postMessage({
+            command: 'generateHtmlReport',
+            data: { 
+                result: result,
+                comments: comments
+            }
+        });
     };
+}
+
+function generateClientSideResults(result) {
+    // Fallback client-side generation (existing logic)
+    const resultsEl = document.getElementById('results');
     
-    if (secretsGate) {
-        /*if (secretsGate.status === 'PASS') {
-            secretsAnalysis = {
-                status: 'safe',
-                message: 'No secrets or confidential data detected'
-            };
-        }*/ if (secretsGate.found && secretsGate.found > 0) {
-            secretsAnalysis = {
-                status: 'warning',
-                message: `Found ${secretsGate.found} potential confidential data logging violations`
-            };
+    const timestamp = new Date().toLocaleString();
+    const projectName = extractProjectName(result.repository_url || 'Repository Scan Results');
+    
+    // Calculate stats
+    const totalGates = result.gates.length;
+    let implementedGates = 0;
+    let partialGates = 0;
+    let notImplementedGates = 0;
+    
+    // Calculate gate statistics
+    for (const gate of result.gates) {
+        const found = gate.found || 0;
+        const status = gate.status;
+        
+        // Apply logical consistency fixes
+        if (found > 0 && gate.name === 'avoid_logging_secrets') {
+            notImplementedGates += 1;
+        } else if (found > 0 && status === 'PASS') {
+            partialGates += 1;
+        } else if (status === 'PASS') {
+            implementedGates += 1;
+        } else if (status === 'WARNING') {
+            partialGates += 1;
+        } else if (status === 'FAIL' || status === 'FAILED') {
+            notImplementedGates += 1;
+        } else {
+            notImplementedGates += 1;
         }
     }
     
@@ -186,76 +266,71 @@ function showResults(result) {
             <p><strong>${result.score.toFixed(1)}% Hard Gates Compliance</strong></p>
         </div>`;
     
-    // Technology Stack section
-    if (techStack.length > 0) {
+    // Generate gates table
+    html += generateGatesTableHtml(result.gates);
+    
+    // Add report link if available
+    if (result.report_url || result.scan_id) {
         html += `
-            <div class="technology-stack">
-                <h2>Technology Stack</h2>
-                <table class="tech-table">
-                    <thead>
-                        <tr>
-                            <th>Type</th>
-                            <th>Name</th>
-                            <th>Version</th>
-                            <th>Purpose</th>
-                        </tr>
-                    </thead>
-                    <tbody>`;
-        
-        techStack.forEach(tech => {
-            html += `
-                        <tr>
-                            <td><strong>${tech.type}</strong></td>
-                            <td>${tech.name}</td>
-                            <td>${tech.version}</td>
-                            <td>${tech.purpose}</td>
-                        </tr>`;
-        });
-        
-        html += `
-                    </tbody>
-                </table>
+            <div class="report-link">
+                <p>
+                    <button id="generateReportBtn" class="detailed-report-link" style="background: #2563eb; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; display: inline-block;">
+                        📊 Generate HTML Report
+                    </button>
+                </p>
             </div>`;
     }
     
-    // Secrets Analysis section
+    // Footer
     html += `
-        <div class="secrets-analysis">
-            <h2>Secrets Analysis</h2>`;
+        <footer style="margin-top: 50px; text-align: center; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 20px;">
+            <p>Hard Gate Assessment Report generated on ${timestamp}</p>
+        </footer>
+    </div>`;
+
+    resultsEl.innerHTML = html;
     
-    if (secretsAnalysis.status === 'safe') {
-        html += `
-            <p class="secrets-safe">
-                <strong>✅ ${secretsAnalysis.message}</strong> in the analyzed codebase.
-            </p>`;
-    } else if (secretsAnalysis.status === 'warning') {
-        html += `
-            <p class="secrets-warning">
-                <strong>⚠️ ${secretsAnalysis.message}</strong>
-            </p>`;
-    } else {
-        html += `
-            <p class="secrets-unknown">
-                <strong>ℹ️ ${secretsAnalysis.message}</strong>
-            </p>`;
+    // Add event listeners for comment inputs and generate button
+    if (result.scan_id) {
+        addCommentHandlers(result.scan_id);
     }
     
-    html += `
-        </div>`;
-    
-    // Hard Gates Analysis section
-    html += `
-        <div class="gates-analysis">
-            <h2>Hard Gates Analysis</h2>`;
-    
-    // Group gates by category
+    const generateBtn = document.getElementById('generateReportBtn');
+    if (generateBtn) {
+        generateBtn.onclick = () => {
+            const comments = collectComments();
+            vscode.postMessage({
+                command: 'generateHtmlReport',
+                data: { 
+                    result: result,
+                    comments: comments
+                }
+            });
+        };
+    }
+}
+
+function extractProjectName(repositoryUrl) {
+    try {
+        const urlParts = repositoryUrl.split('/');
+        let projectName = urlParts[urlParts.length - 1] || 'Repository Scan Results';
+        if (projectName.endsWith('.git')) {
+            projectName = projectName.slice(0, -4);
+        }
+        return projectName;
+    } catch {
+        return 'Repository Scan Results';
+    }
+}
+
+function generateGatesTableHtml(gates) {
     const gateCategories = {
         'Auditability': ['structured_logs', 'avoid_logging_secrets', 'audit_trail', 'correlation_id', 'log_api_calls', 'log_background_jobs', 'ui_errors'],
         'Availability': ['retry_logic', 'timeouts', 'throttling', 'circuit_breakers'],
         'Error Handling': ['error_logs', 'http_codes', 'ui_error_tools'],
         'Testing': ['automated_tests']
     };
-    
+
     const gateNameMap = {
         'structured_logs': 'Logs Searchable Available',
         'avoid_logging_secrets': 'Avoid Logging Confidential Data',
@@ -273,9 +348,11 @@ function showResults(result) {
         'ui_error_tools': 'Include Client Error Tracking',
         'automated_tests': 'Automated Regression Testing'
     };
-    
+
+    let html = '';
+
     Object.entries(gateCategories).forEach(([categoryName, gateNames]) => {
-        const categoryGates = result.gates.filter(gate => gateNames.includes(gate.name));
+        const categoryGates = gates.filter(gate => gateNames.includes(gate.name));
         
         if (categoryGates.length === 0) return;
         
@@ -296,10 +373,10 @@ function showResults(result) {
         
         categoryGates.forEach(gate => {
             const gateName = gateNameMap[gate.name] || formatGateName(gate.name);
-            const statusInfo = getStatusInfo(gate.status);
+            const statusInfo = getStatusInfo(gate);
             const evidence = formatEvidence(gate);
             const recommendation = getRecommendation(gate, gateName);
-            const currentComment = getGateComment(gate.name);
+            const currentComment = ''; // Empty for new comments
             
             html += `
                         <tr>
@@ -324,63 +401,8 @@ function showResults(result) {
                 </table>
             </div>`;
     });
-    
-    html += `
-        </div>`;
-    
-    // Add report link if available
-    if (result.report_url) {
-        html += `
-            <div class="report-link">
-                <p>
-                    <button id="generateReportBtn" class="detailed-report-link" style="background: #2563eb; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; text-decoration: none; display: inline-block;">
-                        📊 View Detailed HTML Report
-                    </button>
-                </p>
-            </div>`;
-    }
-    
-    // Footer
-    html += `
-        <footer style="margin-top: 50px; text-align: center; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 20px;">
-            <p>Hard Gate Assessment Report generated on ${timestamp}</p>
-        </footer>
-    </div>`;
 
-    resultsEl.innerHTML = html;
-    
-    // Add event listeners for comment inputs
-    const commentInputs = resultsEl.querySelectorAll('.comment-input');
-    commentInputs.forEach(input => {
-        input.addEventListener('blur', function() {
-            const gateName = this.getAttribute('data-gate');
-            const comment = this.value;
-            setGateComment(gateName, comment);
-        });
-        
-        // Also save on Enter key
-        input.addEventListener('keydown', function(e) {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                this.blur(); // Trigger the blur event to save
-            }
-        });
-    });
-    
-    // Add event listener for HTML report generation with comments
-    const generateReportBtn = resultsEl.querySelector('#generateReportBtn');
-    if (generateReportBtn) {
-        generateReportBtn.addEventListener('click', function() {
-            // Send comments along with scan result to generate HTML report
-            vscode.postMessage({
-                command: 'generateHtmlReport',
-                data: {
-                    result: result,
-                    comments: gateComments
-                }
-            });
-        });
-    }
+    return html;
 }
 
 function getStatusInfo(status) {
