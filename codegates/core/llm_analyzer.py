@@ -766,52 +766,368 @@ Format each example with a brief description followed by the code.
                                             detected_technologies: Dict[str, List[str]]) -> CodeAnalysisResult:
         """Provide general recommendations for a gate when no code samples are found"""
         
-        # Build a prompt for general gate implementation guidance
+        # Technology-specific recommendations
+        tech_recommendations = []
+        
+        if language == Language.PYTHON:
+            if gate_name == "structured_logs":
+                tech_recommendations = [
+                    "Use Python's logging module with structured formatters",
+                    "Consider using structlog for better structured logging",
+                    "Add JSON formatting to your log handlers"
+                ]
+            elif gate_name == "error_logs":
+                tech_recommendations = [
+                    "Use try-except blocks with proper logging",
+                    "Log exceptions with traceback information",
+                    "Include context information in error logs"
+                ]
+        
+        return CodeAnalysisResult(
+            quality_score=50.0,  # Neutral score for general recommendations
+            patterns_found=[],
+            security_issues=[],
+            recommendations=tech_recommendations,
+            technology_insights={"general": f"No specific {gate_name} patterns found for {language.value}"},
+            code_smells=[],
+            best_practices=tech_recommendations
+        )
+    
+    def analyze_gate_with_enhanced_metadata(self, enhanced_context: Dict[str, Any]) -> CodeAnalysisResult:
+        """Analyze gate implementation using enhanced metadata"""
+        
+        try:
+            # Create comprehensive prompt using enhanced metadata
+            prompt = self._build_enhanced_analysis_prompt(enhanced_context)
+            
+            # Call LLM with enhanced context
+            response = self._call_llm(prompt)
+            
+            # Parse the enhanced response
+            analysis = self._parse_enhanced_analysis_response(response, enhanced_context)
+            
+            return analysis
+            
+        except Exception as e:
+            print(f"⚠️ Enhanced LLM analysis failed: {e}")
+            # Fallback to basic analysis
+            return self._fallback_enhanced_analysis(enhanced_context)
+    
+    def _build_enhanced_analysis_prompt(self, enhanced_context: Dict[str, Any]) -> str:
+        """Build comprehensive analysis prompt using enhanced metadata"""
+        
+        gate_name = enhanced_context['gate_name']
+        language = enhanced_context['language']
+        total_matches = enhanced_context['total_matches']
+        severity_dist = enhanced_context['severity_distribution']
+        pattern_types = enhanced_context['pattern_types']
+        technologies = enhanced_context['detected_technologies']
+        high_priority = enhanced_context['high_priority_issues']
+        enhanced_samples = enhanced_context['enhanced_samples']
+        coverage_stats = enhanced_context['coverage_stats']
+        
+        # Build technology context
         tech_context = ""
-        if detected_technologies:
+        if technologies:
             tech_list = []
-            for category, techs in detected_technologies.items():
-                tech_list.extend(techs)
-            tech_context = f"Technologies detected: {', '.join(tech_list)}"
+            for category, techs in technologies.items():
+                if techs:
+                    tech_list.append(f"  {category}: {', '.join(techs)}")
+            if tech_list:
+                tech_context = f"\n\nDetected Technologies:\n" + "\n".join(tech_list)
+        
+        # Build severity analysis
+        severity_context = ""
+        if severity_dist:
+            severity_context = f"\n\nSeverity Analysis:\n"
+            for severity, count in severity_dist.items():
+                severity_context += f"  {severity}: {count} issues\n"
+        
+        # Build high priority issues context
+        priority_context = ""
+        if high_priority:
+            priority_context = f"\n\nHigh Priority Issues ({len(high_priority)}):\n"
+            for issue in high_priority[:5]:  # Limit to top 5
+                priority_context += f"  {issue['file']}:{issue['line']} - {issue['severity']} (Priority: {issue['priority']})\n"
+                priority_context += f"    Code: {issue['code'][:100]}...\n"
+                if issue['suggested_fix']:
+                    priority_context += f"    Suggested Fix: {issue['suggested_fix']}\n"
+        
+        # Build enhanced samples context
+        samples_context = ""
+        if enhanced_samples:
+            samples_context = f"\n\nCode Analysis Samples:\n"
+            for i, sample in enumerate(enhanced_samples[:5], 1):
+                samples_context += f"{i}. {sample['file']}:{sample['line']} ({sample['severity']})\n"
+                samples_context += f"   Code: {sample['code']}\n"
+                samples_context += f"   Context: {sample['full_line']}\n"
+                samples_context += f"   Pattern: {sample['pattern_type']}, Category: {sample['category']}\n"
+                if sample['function_context']:
+                    func_name = sample['function_context'].get('function_name', 'unknown')
+                    samples_context += f"   Function: {func_name}\n"
+                if sample['suggested_fix']:
+                    samples_context += f"   Suggested Fix: {sample['suggested_fix']}\n"
+                samples_context += "\n"
         
         prompt = f"""
-You are an expert software architect. Provide implementation guidance for {gate_name} in {language.value}.
+You are a senior software architect and code quality expert. Analyze the following comprehensive code quality gate results and provide detailed insights.
+
+## Gate Analysis: {gate_name}
+- **Language**: {language}
+- **Total Issues Found**: {total_matches}
+- **Files Affected**: {coverage_stats['total_files']}
+- **Functions Affected**: {coverage_stats['functions_affected']}
+- **Security Issues**: {coverage_stats['security_issues']}
 
 {tech_context}
+{severity_context}
+{priority_context}
+{samples_context}
 
-No existing implementation was found. Please provide:
+## Coverage Statistics
+- High Severity: {coverage_stats['high_severity_count']} issues
+- Medium Severity: {coverage_stats['medium_severity_count']} issues  
+- Low Severity: {coverage_stats['low_severity_count']} issues
 
-1. **Why this gate is important** (security, reliability, maintainability)
-2. **How to implement** {gate_name} in {language.value}
-3. **Best practices** specific to the detected technologies
-4. **Common pitfalls** to avoid
-5. **Specific recommendations** with examples
+## Analysis Required
+Based on this comprehensive analysis, provide:
 
-Respond in JSON format:
+1. **Quality Score** (0-100): Overall implementation quality
+2. **Security Issues**: Critical security concerns identified
+3. **Patterns Found**: Key implementation patterns detected
+4. **Technology Insights**: Technology-specific observations
+5. **Code Smells**: Problematic code patterns
+6. **Best Practices**: Recommended practices for this gate
+7. **Code Examples**: Improved code examples for the language/framework
+
+## Response Format
+Provide your analysis as a JSON object:
 {{
-    "quality_score": 0,
-    "patterns_found": [],
-    "security_issues": ["Missing {gate_name} implementation"],
-    "recommendations": [<5-7 specific implementation recommendations>],
+    "quality_score": <number>,
+    "security_issues": [
+        "Critical security issue 1",
+        "Security concern 2"
+    ],
+    "patterns_found": [
+        "Pattern 1 description",
+        "Pattern 2 description"
+    ],
     "technology_insights": {{
-        "framework_usage": "<how to use detected frameworks>",
-        "best_practices": "<technology-specific best practices>",
-        "implementation_steps": [<step by step guide>]
+        "framework": "Framework-specific insights",
+        "language": "Language-specific observations",
+        "libraries": "Library usage analysis"
     }},
-    "code_smells": ["No {gate_name} implementation found"],
-    "best_practices": [<list of best practices for this gate>]
+    "code_smells": [
+        "Code smell 1 with location",
+        "Code smell 2 with impact"
+    ],
+    "best_practices": [
+        "Best practice 1 for {gate_name}",
+        "Best practice 2 for {language}"
+    ],
+    "code_examples": [
+        "Example 1: Improved implementation",
+        "Example 2: Better pattern usage"
+    ]
+}}
+
+Focus on actionable insights based on the actual code patterns and metadata provided.
+"""
+        
+        return prompt.strip()
+    
+    def _parse_enhanced_analysis_response(self, response: str, enhanced_context: Dict[str, Any]) -> CodeAnalysisResult:
+        """Parse enhanced LLM analysis response"""
+        
+        try:
+            # Try to parse as JSON first
+            if response.strip().startswith('{'):
+                data = json.loads(response)
+                
+                return CodeAnalysisResult(
+                    quality_score=float(data.get('quality_score', 50.0)),
+                    patterns_found=data.get('patterns_found', []),
+                    security_issues=data.get('security_issues', []),
+                    recommendations=data.get('best_practices', []),
+                    technology_insights=data.get('technology_insights', {}),
+                    code_smells=data.get('code_smells', []),
+                    best_practices=data.get('best_practices', [])
+                )
+            else:
+                # Parse as text response
+                return self._parse_enhanced_text_response(response, enhanced_context)
+                
+        except Exception as e:
+            print(f"⚠️ Failed to parse enhanced LLM response: {e}")
+            return self._fallback_enhanced_analysis(enhanced_context)
+    
+    def _parse_enhanced_text_response(self, response: str, enhanced_context: Dict[str, Any]) -> CodeAnalysisResult:
+        """Parse text-based enhanced analysis response"""
+        
+        # Extract quality score
+        quality_score = 50.0
+        score_match = re.search(r'quality[:\s]*(\d+(?:\.\d+)?)', response, re.IGNORECASE)
+        if score_match:
+            quality_score = float(score_match.group(1))
+        
+        # Extract sections
+        security_issues = re.findall(r'security[:\s]*(.+?)(?=\n\n|\n[A-Z]|$)', response, re.IGNORECASE | re.DOTALL)
+        patterns_found = re.findall(r'pattern[s]?[:\s]*(.+?)(?=\n\n|\n[A-Z]|$)', response, re.IGNORECASE | re.DOTALL)
+        recommendations = re.findall(r'recommend[ation]*[s]?[:\s]*(.+?)(?=\n\n|\n[A-Z]|$)', response, re.IGNORECASE | re.DOTALL)
+        
+        return CodeAnalysisResult(
+            quality_score=quality_score,
+            patterns_found=[p.strip() for p in patterns_found if p.strip()],
+            security_issues=[s.strip() for s in security_issues if s.strip()],
+            recommendations=[r.strip() for r in recommendations if r.strip()],
+            technology_insights={"analysis": "Enhanced text-based analysis"},
+            code_smells=[],
+            best_practices=[r.strip() for r in recommendations if r.strip()]
+        )
+    
+    def _fallback_enhanced_analysis(self, enhanced_context: Dict[str, Any]) -> CodeAnalysisResult:
+        """Fallback analysis when LLM fails"""
+        
+        gate_name = enhanced_context['gate_name']
+        severity_dist = enhanced_context['severity_distribution']
+        high_priority = enhanced_context['high_priority_issues']
+        
+        # Calculate quality score based on severity distribution
+        total_issues = sum(severity_dist.values()) if severity_dist else 0
+        high_severity = severity_dist.get('HIGH', 0)
+        
+        if total_issues == 0:
+            quality_score = 90.0
+        elif high_severity > 5:
+            quality_score = 30.0
+        elif high_severity > 0:
+            quality_score = 50.0
+        else:
+            quality_score = 70.0
+        
+        # Generate basic recommendations
+        recommendations = []
+        if high_priority:
+            recommendations.append(f"Address {len(high_priority)} high-priority issues immediately")
+        if high_severity > 0:
+            recommendations.append(f"Fix {high_severity} high-severity issues in {gate_name}")
+        
+        return CodeAnalysisResult(
+            quality_score=quality_score,
+            patterns_found=[f"Found {total_issues} {gate_name} patterns"],
+            security_issues=[f"High-priority security issues detected: {len(high_priority)}"] if high_priority else [],
+            recommendations=recommendations,
+            technology_insights={"fallback": "Basic analysis due to LLM unavailability"},
+            code_smells=[],
+            best_practices=recommendations
+        )
+    
+    def generate_enhanced_recommendations(self, enhanced_context: Dict[str, Any], 
+                                        base_recommendations: List[str]) -> List[str]:
+        """Generate enhanced recommendations using rich metadata"""
+        
+        try:
+            # Create recommendation prompt using enhanced context
+            prompt = self._build_enhanced_recommendation_prompt(enhanced_context, base_recommendations)
+            
+            # Call LLM
+            response = self._call_llm(prompt)
+            
+            # Parse recommendations
+            enhanced_recs = self._parse_recommendation_response(response)
+            
+            if enhanced_recs:
+                return enhanced_recs
+            else:
+                return base_recommendations
+                
+        except Exception as e:
+            print(f"⚠️ Enhanced recommendation generation failed: {e}")
+            return base_recommendations
+    
+    def _build_enhanced_recommendation_prompt(self, enhanced_context: Dict[str, Any], 
+                                            base_recommendations: List[str]) -> str:
+        """Build enhanced recommendation prompt"""
+        
+        gate_name = enhanced_context['gate_name']
+        language = enhanced_context['language']
+        severity_dist = enhanced_context['severity_distribution']
+        high_priority = enhanced_context['high_priority_issues']
+        technologies = enhanced_context['detected_technologies']
+        
+        # Build context summary
+        context_summary = f"""
+Gate: {gate_name}
+Language: {language}
+High Priority Issues: {len(high_priority)}
+Severity Distribution: {severity_dist}
+Technologies: {technologies}
+"""
+        
+        # Build high priority issues context
+        priority_context = ""
+        if high_priority:
+            priority_context = "\n\nHigh Priority Issues:\n"
+            for issue in high_priority[:3]:
+                priority_context += f"- {issue['file']}:{issue['line']} - {issue['code'][:50]}...\n"
+                priority_context += f"  Severity: {issue['severity']}, Fix: {issue['suggested_fix']}\n"
+        
+        prompt = f"""
+You are a senior software architect. Based on the following code analysis, provide specific, actionable recommendations.
+
+{context_summary}
+{priority_context}
+
+Current Basic Recommendations:
+{chr(10).join(f"- {rec}" for rec in base_recommendations)}
+
+## Task
+Enhance these recommendations with:
+1. **Immediate Actions**: Critical fixes needed now
+2. **Technology-Specific**: Recommendations for the detected technologies
+3. **Implementation Strategy**: Step-by-step improvement plan
+4. **Monitoring**: How to prevent future issues
+
+Provide 3-5 enhanced, specific recommendations as a JSON array:
+{{
+    "recommendations": [
+        "Specific recommendation 1 with concrete steps",
+        "Technology-specific recommendation 2",
+        "Implementation strategy recommendation 3",
+        "Monitoring recommendation 4"
+    ]
 }}
 """
         
+        return prompt.strip()
+    
+    def _parse_recommendation_response(self, response: str) -> List[str]:
+        """Parse LLM recommendation response"""
+        
         try:
-            print(f"🤖 Getting general recommendations for {gate_name}...")
-            response = self._call_llm(prompt)
-            print(f"🤖 General recommendations received for {gate_name}")
-            return self._parse_analysis_response(response)
+            # Try JSON parsing first
+            if response.strip().startswith('{'):
+                data = json.loads(response)
+                return data.get('recommendations', [])
+            
+            # Parse as text with bullet points
+            lines = response.split('\n')
+            recommendations = []
+            
+            for line in lines:
+                line = line.strip()
+                # Remove bullet points and numbering
+                line = re.sub(r'^[-*•]\s*', '', line)
+                line = re.sub(r'^\d+\.\s*', '', line)
+                
+                if line and len(line) > 20:  # Filter out short lines
+                    recommendations.append(line)
+            
+            return recommendations[:5]  # Limit to 5 recommendations
+            
         except Exception as e:
-            print(f"🚨 Failed to get general recommendations for {gate_name}: {str(e)}")
-            # Return basic fallback recommendations
-            return self._fallback_analysis(gate_name, [], language)
+            print(f"⚠️ Failed to parse recommendation response: {e}")
+            return []
 
 
 class LLMIntegrationManager:
@@ -1003,9 +1319,15 @@ class LLMIntegrationManager:
                               language: Language,
                               detected_technologies: Dict[str, List[str]],
                               base_recommendations: List[str]) -> Dict[str, Any]:
-        """Enhance gate validation with LLM analysis"""
+        """Enhance gate validation with LLM analysis using enhanced metadata"""
+        
+        print(f"🤖 LLM enhance_gate_validation called for {gate_name}")
+        print(f"   - Matches received: {len(matches)}")
+        print(f"   - Language: {language}")
+        print(f"   - LLM enabled: {self.is_enabled()}")
         
         if not self.is_enabled():
+            print(f"   - LLM not enabled, returning base recommendations")
             return {
                 'enhanced_quality_score': None,
                 'llm_recommendations': base_recommendations,
@@ -1014,31 +1336,139 @@ class LLMIntegrationManager:
                 'technology_insights': {}
             }
         
-        # Extract code samples from matches
-        code_samples = [match.get('match', '') for match in matches[:10]]  # Limit to 10 samples
+        # Debug: Show sample match structure
+        if matches:
+            sample_match = matches[0]
+            print(f"   - Sample match keys: {list(sample_match.keys())}")
+            print(f"   - Sample match content: {str(sample_match)[:200]}...")
         
-        # Perform LLM analysis
-        analysis = self.analyzer.analyze_gate_implementation(
-            gate_name, code_samples, language, detected_technologies
-        )
+        try:
+            # Prepare enhanced context using rich metadata from matches
+            enhanced_context = self._prepare_enhanced_context(
+                gate_name, matches, language, detected_technologies
+            )
+            
+            print(f"   - Enhanced context prepared with {enhanced_context['total_matches']} matches")
+            print(f"   - High priority issues: {len(enhanced_context['high_priority_issues'])}")
+            
+            # Use enhanced metadata for comprehensive LLM analysis
+            analysis_result = self.analyzer.analyze_gate_with_enhanced_metadata(enhanced_context)
+            
+            print(f"   - LLM analysis completed successfully")
+            
+            return {
+                'enhanced_quality_score': analysis_result.quality_score,
+                'llm_recommendations': analysis_result.recommendations,
+                'code_examples': analysis_result.best_practices,
+                'security_insights': analysis_result.security_issues,
+                'technology_insights': analysis_result.technology_insights,
+                'patterns_found': analysis_result.patterns_found,
+                'code_smells': analysis_result.code_smells
+            }
+            
+        except Exception as e:
+            print(f"   - LLM analysis failed: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # Fallback to base recommendations
+            return {
+                'enhanced_quality_score': None,
+                'llm_recommendations': base_recommendations,
+                'code_examples': [],
+                'security_insights': [],
+                'technology_insights': {}
+            }
+    
+    def _prepare_enhanced_context(self, gate_name: str, matches: List[Dict[str, Any]], 
+                                language: Language, detected_technologies: Dict[str, List[str]]) -> Dict[str, Any]:
+        """Prepare enhanced context using rich metadata from matches"""
         
-        # Enhance recommendations
-        enhanced_recommendations = self.analyzer.enhance_recommendations(
-            base_recommendations, gate_name, language, detected_technologies
-        )
+        # Extract key information from enhanced metadata
+        files_analyzed = list(set(match.get('relative_path', match.get('file', 'unknown')) for match in matches))
+        severity_counts = {}
+        pattern_types = {}
+        function_contexts = []
+        high_priority_issues = []
         
-        # Generate code examples
-        code_examples = self.analyzer.generate_code_examples(
-            gate_name, language, detected_technologies
-        )
+        for match in matches:
+            # Count severities
+            severity = match.get('severity', 'UNKNOWN')
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+            
+            # Count pattern types
+            pattern_type = match.get('pattern_type', 'unknown')
+            pattern_types[pattern_type] = pattern_types.get(pattern_type, 0) + 1
+            
+            # Collect function contexts
+            func_context = match.get('function_context')
+            if func_context and func_context.get('function_name'):
+                function_contexts.append({
+                    'function': func_context.get('function_name', 'unknown'),
+                    'line': func_context.get('line_number', 0),
+                    'signature': func_context.get('signature', ''),
+                    'file': match.get('file_name', 'unknown')
+                })
+            
+            # Collect high priority issues
+            priority = match.get('priority', 0)
+            if priority >= 8:  # High priority threshold
+                high_priority_issues.append({
+                    'file': match.get('file_name', 'unknown'),
+                    'line': match.get('line_number', 0),
+                    'code': match.get('matched_text', match.get('match', '')),
+                    'severity': severity,
+                    'priority': priority,
+                    'category': match.get('category', 'unknown'),
+                    'suggested_fix': match.get('suggested_fix', '')
+                })
         
-        return {
-            'enhanced_quality_score': analysis.quality_score,
-            'llm_recommendations': enhanced_recommendations,
-            'code_examples': code_examples,
-            'security_insights': analysis.security_issues,
-            'technology_insights': analysis.technology_insights,
-            'patterns_found': analysis.patterns_found,
-            'code_smells': analysis.code_smells,
-            'best_practices': analysis.best_practices
-        } 
+        # Get sample matches with enhanced details (limit to avoid token overflow)
+        sample_matches = matches[:10] if len(matches) > 10 else matches
+        
+        # Prepare enhanced sample data
+        enhanced_samples = []
+        for match in sample_matches:
+            enhanced_sample = {
+                'file': match.get('file_name', 'unknown'),
+                'relative_path': match.get('relative_path', 'unknown'),
+                'line': match.get('line_number', 0),
+                'column': match.get('column_start', 0),
+                'code': match.get('matched_text', match.get('match', '')),
+                'full_line': match.get('full_line', ''),
+                'context_lines': match.get('context_lines', []),
+                'severity': match.get('severity', 'UNKNOWN'),
+                'priority': match.get('priority', 0),
+                'category': match.get('category', 'unknown'),
+                'pattern_type': match.get('pattern_type', 'unknown'),
+                'language': match.get('language', language.value if language else 'unknown'),
+                'function_context': match.get('function_context', {}),
+                'suggested_fix': match.get('suggested_fix', ''),
+                'documentation_link': match.get('documentation_link', ''),
+                'is_comment': match.get('is_comment', False),
+                'is_string_literal': match.get('is_string_literal', False)
+            }
+            enhanced_samples.append(enhanced_sample)
+        
+        enhanced_context = {
+            'gate_name': gate_name,
+            'language': language.value if language else 'unknown',
+            'total_matches': len(matches),
+            'files_analyzed': files_analyzed[:10],  # Limit for context
+            'severity_distribution': severity_counts,
+            'pattern_types': pattern_types,
+            'detected_technologies': detected_technologies,
+            'function_contexts': function_contexts[:5],  # Top 5 functions
+            'high_priority_issues': high_priority_issues,
+            'enhanced_samples': enhanced_samples,
+            'coverage_stats': {
+                'total_files': len(files_analyzed),
+                'high_severity_count': severity_counts.get('HIGH', 0),
+                'medium_severity_count': severity_counts.get('MEDIUM', 0),
+                'low_severity_count': severity_counts.get('LOW', 0),
+                'security_issues': len([m for m in matches if 'security' in m.get('category', '').lower()]),
+                'functions_affected': len(function_contexts)
+            }
+        }
+        
+        return enhanced_context 

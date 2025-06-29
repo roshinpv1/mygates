@@ -398,7 +398,8 @@ class GateValidator:
             final_score=final_score,
             status=status,
             details=all_details,
-            recommendations=all_recommendations  # Don't use set() to avoid unhashable type error
+            recommendations=all_recommendations,  # Don't use set() to avoid unhashable type error
+            matches=all_matches  # Include enhanced metadata
         )
     
     def _determine_gate_status(self, score: float, gate_type: GateType = None, found: int = 0) -> str:

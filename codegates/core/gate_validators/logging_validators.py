@@ -33,8 +33,10 @@ class StructuredLogsValidator(BaseGateValidator):
         # Calculate quality score
         quality_score = self._calculate_quality_score(matches, expected)
         
-        # Generate details and recommendations
+        # Generate details
         details = self._generate_details(matches, detected_technologies)
+        
+        # Generate basic recommendations (will be enhanced by LLM if available)
         recommendations = self._generate_recommendations_from_matches(matches, expected)
         
         return GateValidationResult(
@@ -46,6 +48,27 @@ class StructuredLogsValidator(BaseGateValidator):
             technologies=detected_technologies,
             matches=matches
         )
+    
+    def enhance_with_llm(self, result: GateValidationResult, llm_manager=None) -> GateValidationResult:
+        """Enhance validation result with LLM-powered recommendations"""
+        if llm_manager and llm_manager.is_enabled():
+            try:
+                llm_recommendations = self._generate_llm_recommendations(
+                    gate_name="structured_logs",
+                    matches=result.matches,
+                    expected=result.expected,
+                    detected_technologies=result.technologies,
+                    llm_manager=llm_manager
+                )
+                if llm_recommendations:
+                    result.recommendations = llm_recommendations
+                    print(f"✅ LLM recommendations generated for structured_logs")
+                else:
+                    print(f"⚠️ LLM returned empty recommendations for structured_logs")
+            except Exception as e:
+                print(f"⚠️ LLM recommendation generation failed for structured_logs: {e}")
+        
+        return result
     
     def _get_language_patterns(self) -> Dict[str, List[str]]:
         """Get language-specific patterns for structured logging"""
@@ -159,14 +182,14 @@ class StructuredLogsValidator(BaseGateValidator):
         quality_scores = {}
         
         # Check for proper field usage
-        json_structured = len([m for m in matches if 'json' in m['match'].lower()])
+        json_structured = len([m for m in matches if 'json' in m['matched_text'].lower()])
         if json_structured > 0:
             quality_scores['json_format'] = min(json_structured * 5, 15)
         
         # Check for context fields (correlation IDs, user IDs, etc.)
         context_patterns = ['correlation', 'request_id', 'user_id', 'trace_id', 'session']
         context_matches = len([m for m in matches 
-                             if any(pattern in m['match'].lower() for pattern in context_patterns)])
+                             if any(pattern in m['matched_text'].lower() for pattern in context_patterns)])
         if context_matches > 0:
             quality_scores['context_fields'] = min(context_matches * 3, 10)
         
@@ -178,7 +201,7 @@ class StructuredLogsValidator(BaseGateValidator):
         # Check for proper log levels usage
         level_patterns = ['error', 'warn', 'info', 'debug']
         level_matches = len([m for m in matches 
-                           if any(level in m['match'].lower() for level in level_patterns)])
+                           if any(level in m['matched_text'].lower() for level in level_patterns)])
         if level_matches > 0:
             quality_scores['log_levels'] = min(level_matches * 2, 10)
         
@@ -247,23 +270,20 @@ class StructuredLogsValidator(BaseGateValidator):
         
         details = []
         
-        # Group by file
-        files_with_logging = {}
-        for match in matches:
-            file_path = match['file']
-            if file_path not in files_with_logging:
-                files_with_logging[file_path] = []
-            files_with_logging[file_path].append(match)
+        # Get unique files with structured logging
+        try:
+            files_with_structured = len(set(match.get('file', match.get('relative_path', 'unknown')) for match in matches))
+        except Exception:
+            files_with_structured = 0
         
-        details.append(f"Found structured logging in {len(files_with_logging)} files")
+        details.append(f"Found structured logging in {files_with_structured} files")
         
         # Show top files with most logging
-        sorted_files = sorted(files_with_logging.items(), 
-                            key=lambda x: len(x[1]), reverse=True)
+        sorted_files = sorted(matches, key=lambda m: len(m['matched_text']), reverse=True)
         
-        for file_path, file_matches in sorted_files[:3]:
-            relative_path = str(Path(file_path).name)
-            details.append(f"  {relative_path}: {len(file_matches)} structured log statements")
+        for match in sorted_files[:3]:
+            file_path = match['file']
+            details.append(f"  {file_path}: {len(match['matched_text'])} structured log statements")
         
         # Add technology detection details
         details.append("\n📊 Detected Technologies:")
@@ -274,28 +294,26 @@ class StructuredLogsValidator(BaseGateValidator):
     
     def _generate_recommendations_from_matches(self, matches: List[Dict[str, Any]], 
                                              expected: int) -> List[str]:
-        """Generate recommendations based on matches"""
-        
-        recommendations = []
+        """Generate recommendations based on structured logging findings"""
         
         if len(matches) == 0:
-            recommendations.extend(self._get_zero_implementation_recommendations())
+            return self._get_zero_implementation_recommendations()
         elif len(matches) < expected:
-            recommendations.extend(self._get_partial_implementation_recommendations())
-        
-        # Quality-based recommendations
-        quality_bonuses = self._assess_implementation_quality(matches)
-        
-        if 'json_format' not in quality_bonuses:
-            recommendations.append("Add JSON formatting to structured logs")
-        
-        if 'context_fields' not in quality_bonuses:
-            recommendations.append("Include context fields like correlation_id, user_id")
-        
-        if 'consistency' not in quality_bonuses:
-            recommendations.append("Implement structured logging consistently across more files")
-        
-        return recommendations
+            return self._get_partial_implementation_recommendations()
+        else:
+            return self._get_quality_improvement_recommendations()
+    
+    def generate_llm_recommendations(self, matches: List[Dict[str, Any]], expected: int, 
+                                   detected_technologies: Dict[str, List[str]], 
+                                   llm_manager=None) -> List[str]:
+        """Generate LLM-powered recommendations for structured logging"""
+        return self._generate_llm_recommendations(
+            gate_name="structured_logs",
+            matches=matches,
+            expected=expected,
+            detected_technologies=detected_technologies,
+            llm_manager=llm_manager
+        )
 
 
 # Placeholder classes for other logging validators
@@ -541,7 +559,7 @@ class SecretLogsValidator(BaseGateValidator):
         category_counts = {}
         for category, keywords in violation_categories.items():
             count = len([match for match in matches 
-                        if any(keyword in match['match'].lower() for keyword in keywords)])
+                        if any(keyword in match['matched_text'].lower() for keyword in keywords)])
             if count > 0:
                 category_counts[category] = count
         
@@ -616,7 +634,7 @@ class SecretLogsValidator(BaseGateValidator):
         categorized_matches = {}
         
         for match in matches:
-            match_text = match['match'].lower()
+            match_text = match['matched_text'].lower()
             categorized = False
             
             for category, keywords in violation_categories.items():
@@ -649,7 +667,7 @@ class SecretLogsValidator(BaseGateValidator):
             if category in categorized_matches and shown_count < 5:
                 for match in categorized_matches[category][:min(2, 5-shown_count)]:
                     file_name = Path(match['file']).name
-                    details.append(f"  📄 {file_name}:{match['line']} - {match['match'][:60]}...")
+                    details.append(f"   {file_name}:{match.get('line_number', match.get('line', '?'))} - {match.get('matched_text', match.get('match', ''))[:60]}...")
                     shown_count += 1
                     if shown_count >= 5:
                         break
@@ -782,14 +800,14 @@ class AuditTrailValidator(BaseGateValidator):
         # Check for different types of audit events
         event_types = ['create', 'update', 'delete', 'login', 'logout', 'access']
         covered_events = len([match for match in matches 
-                            if any(event in match['match'].lower() for event in event_types)])
+                            if any(event in match['matched_text'].lower() for event in event_types)])
         
         if covered_events > 0:
             quality_scores['event_coverage'] = min(covered_events * 5, 20)
         
         # Check for user context in audit logs
         user_context = len([match for match in matches 
-                          if any(ctx in match['match'].lower() for ctx in ['user', 'admin', 'actor'])])
+                          if any(ctx in match['matched_text'].lower() for ctx in ['user', 'admin', 'actor'])])
         
         if user_context > 0:
             quality_scores['user_context'] = min(user_context * 3, 15)
@@ -835,8 +853,12 @@ class AuditTrailValidator(BaseGateValidator):
         
         details = [f"Found {len(matches)} audit logging statements"]
         
-        # Group by file
-        files_with_audit = len(set(match['file'] for match in matches))
+        # Get unique files with audit logging
+        try:
+            files_with_audit = len(set(match.get('file', match.get('relative_path', 'unknown')) for match in matches))
+        except Exception:
+            files_with_audit = 0
+        
         details.append(f"Audit logging present in {files_with_audit} files")
         
         return details
@@ -969,7 +991,7 @@ class CorrelationIdValidator(BaseGateValidator):
         # Check for proper ID generation
         generation_patterns = ['uuid', 'guid', 'random']
         id_generation = len([match for match in matches 
-                           if any(pattern in match['match'].lower() for pattern in generation_patterns)])
+                           if any(pattern in match['matched_text'].lower() for pattern in generation_patterns)])
         
         if id_generation > 0:
             quality_scores['id_generation'] = min(id_generation * 5, 15)
@@ -977,7 +999,7 @@ class CorrelationIdValidator(BaseGateValidator):
         # Check for HTTP header usage
         header_patterns = ['x-correlation-id', 'x-request-id', 'header']
         header_usage = len([match for match in matches 
-                          if any(pattern in match['match'].lower() for pattern in header_patterns)])
+                          if any(pattern in match['matched_text'].lower() for pattern in header_patterns)])
         
         if header_usage > 0:
             quality_scores['header_usage'] = min(header_usage * 5, 15)
@@ -1025,11 +1047,11 @@ class CorrelationIdValidator(BaseGateValidator):
         
         # Check for different types
         types = []
-        if any('correlation' in match['match'].lower() for match in matches):
+        if any('correlation' in match['matched_text'].lower() for match in matches):
             types.append('correlation_id')
-        if any('request' in match['match'].lower() for match in matches):
+        if any('request' in match['matched_text'].lower() for match in matches):
             types.append('request_id')
-        if any('trace' in match['match'].lower() for match in matches):
+        if any('trace' in match['matched_text'].lower() for match in matches):
             types.append('trace_id')
         
         if types:
@@ -1163,9 +1185,9 @@ class ApiLogsValidator(BaseGateValidator):
         
         # Check for request/response logging
         request_logs = len([match for match in matches 
-                          if 'request' in match['match'].lower()])
+                          if 'request' in match['matched_text'].lower()])
         response_logs = len([match for match in matches 
-                           if 'response' in match['match'].lower()])
+                           if 'response' in match['matched_text'].lower()])
         
         if request_logs > 0:
             quality_scores['request_logging'] = min(request_logs * 3, 10)
@@ -1174,7 +1196,7 @@ class ApiLogsValidator(BaseGateValidator):
         
         # Check for endpoint identification
         endpoint_logs = len([match for match in matches 
-                           if any(pattern in match['match'].lower() 
+                           if any(pattern in match['matched_text'].lower() 
                                  for pattern in ['endpoint', 'route', 'path'])])
         
         if endpoint_logs > 0:
@@ -1222,8 +1244,8 @@ class ApiLogsValidator(BaseGateValidator):
         details = [f"Found {len(matches)} API logging statements"]
         
         # Check for different types
-        request_count = len([m for m in matches if 'request' in m['match'].lower()])
-        response_count = len([m for m in matches if 'response' in m['match'].lower()])
+        request_count = len([m for m in matches if 'request' in m['matched_text'].lower()])
+        response_count = len([m for m in matches if 'response' in m['matched_text'].lower()])
         
         if request_count > 0:
             details.append(f"Request logging: {request_count} instances")
@@ -1367,7 +1389,7 @@ class BackgroundJobLogsValidator(BaseGateValidator):
         # Check for job lifecycle logging
         lifecycle_patterns = ['start', 'complete', 'failed', 'retry']
         lifecycle_logs = len([match for match in matches 
-                            if any(pattern in match['match'].lower() for pattern in lifecycle_patterns)])
+                            if any(pattern in match['matched_text'].lower() for pattern in lifecycle_patterns)])
         
         if lifecycle_logs > 0:
             quality_scores['lifecycle_logging'] = min(lifecycle_logs * 3, 15)
@@ -1375,7 +1397,7 @@ class BackgroundJobLogsValidator(BaseGateValidator):
         # Check for error handling
         error_patterns = ['error', 'exception', 'failed']
         error_logs = len([match for match in matches 
-                        if any(pattern in match['match'].lower() for pattern in error_patterns)])
+                        if any(pattern in match['matched_text'].lower() for pattern in error_patterns)])
         
         if error_logs > 0:
             quality_scores['error_handling'] = min(error_logs * 2, 10)
@@ -1423,13 +1445,13 @@ class BackgroundJobLogsValidator(BaseGateValidator):
         
         # Check for different job types
         job_types = []
-        if any('celery' in match['match'].lower() for match in matches):
+        if any('celery' in match['matched_text'].lower() for match in matches):
             job_types.append('Celery')
-        if any('scheduled' in match['match'].lower() for match in matches):
+        if any('scheduled' in match['matched_text'].lower() for match in matches):
             job_types.append('Scheduled')
-        if any('cron' in match['match'].lower() for match in matches):
+        if any('cron' in match['matched_text'].lower() for match in matches):
             job_types.append('Cron')
-        if any('queue' in match['match'].lower() for match in matches):
+        if any('queue' in match['matched_text'].lower() for match in matches):
             job_types.append('Queue')
         
         if job_types:

@@ -1,0 +1,20 @@
+LOCAL_LLM_URL="http://localhost:1234/v1"
+LOCAL_LLM_API_KEY="local-llm-key"
+#LOCAL_MODEL="meta-llama-3.1-8b-instruct"
+LOCAL_MODEL="meta-llama-3.1-8b-instruct"
+
+CODEGATES_API_BASE_URL=http://localhost:8000 
+
+# Production  
+CODEGATES_API_BASE_URL=http://localhost
+# Custom port
+CODEGATES_API_PORT=8000 
+
+TEMP_REPO_DIR=./repo
+UPLOAD_FOLDER=./upload
+TMPDIR=./tmp
+CODEGATES_REPORTS_DIR=./report
+UPLOAD_FOLDER=./upload
+CODEGATES_PREFER_API_CHECKOUT=true
+CODEGATES_ENABLE_API_FALLBACK=true
+CODEGATES_API_TIMEOUT=120

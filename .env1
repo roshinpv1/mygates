@@ -1,0 +1,44 @@
+# CodeGates Environment Configuration
+# LLM Integration Settings
+
+# Local LLM Configuration (currently active)
+LOCAL_LLM_URL="http://localhost:1234/v1"
+LOCAL_LLM_API_KEY="local-llm-key"
+#LOCAL_MODEL="meta-llama-3.1-8b-instruct"
+LOCAL_MODEL="deepseek-r1-distill-qwen-7b"
+LOCAL_LLM_TEMPERATURE=0.1
+LOCAL_LLM_MAX_TOKENS=4000
+
+# OpenAI Configuration (uncomment to use)
+# OPENAI_API_KEY=sk-your-openai-api-key-here
+# OPENAI_MODEL=gpt-4
+# OPENAI_TEMPERATURE=0.1
+# OPENAI_MAX_TOKENS=4000
+
+# Anthropic Configuration (uncomment to use)
+# ANTHROPIC_API_KEY=sk-ant-your-anthropic-api-key-here
+# ANTHROPIC_MODEL=claude-3-sonnet-20240229
+# ANTHROPIC_TEMPERATURE=0.1
+# ANTHROPIC_MAX_TOKENS=4000
+
+# Google Gemini Configuration (uncomment to use)
+# GEMINI_API_KEY=your-gemini-api-key-here
+# GEMINI_MODEL=gemini-pro
+# GEMINI_TEMPERATURE=0.1
+# GEMINI_MAX_TOKENS=4000
+
+# Enterprise LLM Configuration (uncomment to use)
+# ENTERPRISE_LLM_URL=https://your-enterprise-llm-endpoint
+# ENTERPRISE_LLM_MODEL=meta-llama-3.1-8b-instruct
+# ENTERPRISE_LLM_API_KEY=your-enterprise-api-key
+# ENTERPRISE_LLM_TOKEN=your-enterprise-token
+# ENTERPRISE_LLM_TEMPERATURE=0.1
+# ENTERPRISE_LLM_MAX_TOKENS=8000
+
+# GitHub Token (for private repositories)
+# GITHUB_TOKEN=ghp_your-github-token-here
+
+# Optional: Container/Deployment Settings
+# TMPDIR=/app/temp
+# HOME=/app
+# CODEGATES_CONTAINER_MODE=true

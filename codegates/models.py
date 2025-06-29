@@ -49,6 +49,7 @@ class GateScore(BaseModel):
     status: str = Field(default="UNKNOWN", description="Pass/Fail/Warning status")
     details: List[str] = Field(default_factory=list, description="Implementation details")
     recommendations: List[str] = Field(default_factory=list, description="Improvement recommendations")
+    matches: List[Dict[str, Any]] = Field(default_factory=list, description="Enhanced metadata for pattern matches")
     
     @field_validator('quality_score', mode='before')
     @classmethod

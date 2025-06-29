@@ -140,6 +140,285 @@ curl -X POST "http://localhost:8000/api/v1/scan" \
   }'
 ```
 
+## Intake Assessment (OCP Migration)
+
+### Check Intake Module Status
+```bash
+curl -X GET "http://localhost:8000/api/v1/intake/status"
+```
+
+### Check Intake Module Status with Pretty JSON
+```bash
+curl -s -X GET "http://localhost:8000/api/v1/intake/status" | jq '.'
+```
+
+### Extract Data from Excel File (Utility)
+```bash
+curl -X POST "http://localhost:8000/api/v1/intake/extract-excel" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "excel_file_path": "/path/to/component_data.xlsx",
+    "sheet_name": "Components"
+  }'
+```
+
+### Start Intake Assessment (GitHub Repository Only)
+```bash
+curl -X POST "http://localhost:8000/api/v1/intake/assess" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repository_url": "https://github.com/username/repository",
+    "github_token": "your_github_token",
+    "options": {
+      "include_patterns": ["*.py", "*.js", "*.java", "*.go"],
+      "exclude_patterns": ["tests/*", "node_modules/*"],
+      "max_file_size": 100000,
+      "use_cache": true,
+      "include_jira": false
+    }
+  }'
+```
+
+### Start Intake Assessment (Repository + Component Data)
+```bash
+curl -X POST "http://localhost:8000/api/v1/intake/assess" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repository_url": "https://github.com/username/repository",
+    "github_token": "your_github_token",
+    "component_data": {
+      "component_name": "My Web Application",
+      "business_criticality": "High",
+      "current_environment": "TAS",
+      "application_type": "Web Service",
+      "technology_stack": {
+        "language": "Java",
+        "framework": "Spring Boot",
+        "database": "PostgreSQL"
+      },
+      "dependencies": ["Redis", "Kafka", "LDAP"],
+      "component_declarations": {
+        "redis": true,
+        "kafka": true,
+        "ldap": true,
+        "database": true,
+        "postgresql": true,
+        "mysql": false,
+        "mongodb": false
+      }
+    },
+    "options": {
+      "use_cache": true,
+      "include_jira": false
+    }
+  }'
+```
+
+### Start Intake Assessment (Component Data Only - No Code)
+```bash
+curl -X POST "http://localhost:8000/api/v1/intake/assess" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "component_data": {
+      "component_name": "Legacy Payment Service",
+      "business_criticality": "Critical",
+      "current_environment": "On-Premises",
+      "application_type": "Microservice",
+      "technology_stack": {
+        "language": "Python",
+        "framework": "Django",
+        "database": "Oracle"
+      },
+      "component_declarations": {
+        "database": true,
+        "oracle": true,
+        "postgresql": false,
+        "auth": true,
+        "ldap": true,
+        "soap_calls": true,
+        "rest_api": true
+      },
+      "custom_fields": {
+        "team": "Payments Team",
+        "contact": "payments@company.com",
+        "migration_priority": "High"
+      }
+    },
+    "options": {
+      "use_cache": true
+    }
+  }'
+```
+
+### Start Intake Assessment (Local Directory)
+```bash
+curl -X POST "http://localhost:8000/api/v1/intake/assess" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "local_directory": "/path/to/local/project",
+    "component_data": {
+      "component_name": "Local Development Project",
+      "business_criticality": "Medium",
+      "current_environment": "Development",
+      "application_type": "API Service"
+    },
+    "options": {
+      "include_patterns": ["*.py", "*.js", "*.yaml"],
+      "use_cache": true
+    }
+  }'
+```
+
+### Complete Workflow: Excel → Component Data → Assessment
+```bash
+# Step 1: Extract data from Excel file
+EXCEL_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/intake/extract-excel" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "excel_file_path": "/path/to/component_data.xlsx"
+  }')
+
+echo "Excel Extraction Response: $EXCEL_RESPONSE"
+
+# Step 2: Extract component data from response (requires jq)
+COMPONENT_DATA=$(echo $EXCEL_RESPONSE | jq '.component_data')
+
+# Step 3: Start assessment with extracted component data and repository
+ASSESSMENT_RESPONSE=$(curl -s -X POST "http://localhost:8000/api/v1/intake/assess" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"repository_url\": \"https://github.com/username/repository\",
+    \"github_token\": \"your_github_token\",
+    \"component_data\": $COMPONENT_DATA,
+    \"options\": {
+      \"use_cache\": true
+    }
+  }")
+
+echo "Assessment started: $ASSESSMENT_RESPONSE"
+```
+
+### Get Intake Assessment Status
+```bash
+# Replace {assessment_id} with actual assessment ID
+curl -X GET "http://localhost:8000/api/v1/intake/assess/{assessment_id}/status"
+```
+
+### Get Intake Assessment Status with Pretty JSON
+```bash
+curl -s -X GET "http://localhost:8000/api/v1/intake/assess/{assessment_id}/status" | jq '.'
+```
+
+### Get OCP Assessment Report (HTML)
+```bash
+# Replace {assessment_id} with actual assessment ID
+curl -X GET "http://localhost:8000/api/v1/intake/assess/{assessment_id}/reports/ocp_assessment" \
+  -H "Accept: text/html" \
+  -o "ocp_assessment_{assessment_id}.html"
+```
+
+### Get Hard Gate Assessment Report
+```bash
+curl -s -X GET "http://localhost:8000/api/v1/intake/assess/{assessment_id}/reports/hard_gate_assessment" | jq '.'
+```
+
+### Get Intake Assessment Report (HTML)
+```bash
+curl -X GET "http://localhost:8000/api/v1/intake/assess/{assessment_id}/reports/intake_assessment" \
+  -H "Accept: text/html" \
+  -o "intake_assessment_{assessment_id}.html"
+```
+
+### List All Intake Assessments
+```bash
+curl -X GET "http://localhost:8000/api/v1/intake/assessments"
+```
+
+### List All Intake Assessments with Pretty JSON
+```bash
+curl -s -X GET "http://localhost:8000/api/v1/intake/assessments" | jq '.'
+```
+
+### Component Data Examples
+
+#### Example 1: Simple Component Data
+```json
+{
+  "component_name": "User Authentication Service",
+  "business_criticality": "High",
+  "current_environment": "TKGI",
+  "application_type": "Microservice"
+}
+```
+
+#### Example 2: Detailed Component Data with Technology Stack
+```json
+{
+  "component_name": "Order Processing API",
+  "business_criticality": "Critical",
+  "current_environment": "TAS",
+  "application_type": "REST API",
+  "technology_stack": {
+    "primary_language": "Java",
+    "framework": "Spring Boot",
+    "build_tool": "Maven",
+    "database": "PostgreSQL",
+    "cache": "Redis",
+    "messaging": "RabbitMQ"
+  },
+  "dependencies": [
+    "PostgreSQL Database",
+    "Redis Cache", 
+    "RabbitMQ",
+    "LDAP Authentication",
+    "External Payment Gateway"
+  ],
+  "component_declarations": {
+    "database": true,
+    "postgresql": true,
+    "mysql": false,
+    "redis": true,
+    "rabbitmq": true,
+    "kafka": false,
+    "ldap": true,
+    "auth": true,
+    "rest_api": true,
+    "soap_calls": false,
+    "splunk": true,
+    "appd": false
+  },
+  "custom_fields": {
+    "team_owner": "Platform Team",
+    "business_owner": "John Doe",
+    "migration_timeline": "Q2 2024",
+    "compliance_requirements": ["PCI-DSS", "SOX"],
+    "peak_traffic": "10000 requests/hour"
+  }
+}
+```
+
+### Legacy Excel File Support
+For backwards compatibility, you can still extract from Excel files first:
+
+```bash
+# 1. Extract from Excel
+curl -X POST "http://localhost:8000/api/v1/intake/extract-excel" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "excel_file_path": "/path/to/legacy_components.xlsx",
+    "sheet_name": "ComponentData"
+  }' > extracted_data.json
+
+# 2. Use extracted data for assessment
+curl -X POST "http://localhost:8000/api/v1/intake/assess" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"repository_url\": \"https://github.com/company/legacy-app\",
+    \"component_data\": $(cat extracted_data.json | jq '.component_data'),
+    \"options\": {\"use_cache\": true}
+  }"
+```
+
 ## Scan Status and Results
 
 ### Get Scan Status

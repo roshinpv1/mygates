@@ -125,21 +125,25 @@ class LLMOptimizer:
         
         # Define relevance keywords for each gate type
         relevance_keywords = {
-            'structured_logs': ['log', 'logger', 'logging', 'json', 'structured'],
-            'avoid_logging_secrets': ['password', 'token', 'secret', 'api_key', 'log'],
-            'audit_trail': ['audit', 'log', 'track', 'history', 'event'],
-            'correlation_id': ['correlation', 'request_id', 'trace_id', 'uuid'],
-            'error_logs': ['error', 'exception', 'log', 'catch', 'try'],
-            'retry_logic': ['retry', 'attempt', 'backoff', 'exponential'],
-            'timeouts': ['timeout', 'deadline', 'duration', 'time'],
-            'circuit_breakers': ['circuit', 'breaker', 'fallback', 'threshold'],
-            'throttling': ['throttle', 'rate', 'limit', 'quota'],
-            'automated_tests': ['test', 'assert', 'mock', 'spec', 'it(', 'describe('],
-            'http_codes': ['status', 'code', 'http', '200', '404', '500'],
+            'structured_logs': ['log', 'logger', 'logging', 'json', 'structured', 'extra', 'format'],
+            'avoid_logging_secrets': ['password', 'token', 'secret', 'api_key', 'log', 'credential', 'auth'],
+            'audit_trail': ['audit', 'log', 'track', 'history', 'event', 'record'],
+            'correlation_id': ['correlation', 'request_id', 'trace_id', 'uuid', 'x-correlation'],
+            'error_logs': ['error', 'exception', 'log', 'catch', 'try', 'except', 'raise'],
+            'retry_logic': ['retry', 'attempt', 'backoff', 'exponential', 'sleep', 'time.sleep'],
+            'timeouts': ['timeout', 'deadline', 'duration', 'time', 'sleep', 'wait'],
+            'circuit_breakers': ['circuit', 'breaker', 'fallback', 'threshold', 'failure'],
+            'throttling': ['throttle', 'rate', 'limit', 'quota', 'sleep', 'delay'],
+            'automated_tests': ['test', 'assert', 'mock', 'spec', 'it(', 'describe(', 'unittest', 'pytest'],
+            'http_codes': ['status', 'code', 'http', '200', '404', '500', 'response', 'status_code'],
+            'log_api_calls': ['api', 'endpoint', 'request', 'response', 'log', 'method'],
+            'ui_errors': ['error', 'exception', 'alert', 'message', 'ui', 'user'],
         }
         
         keywords = relevance_keywords.get(gate_name.lower(), [])
         if not keywords:
+            # If no keywords defined, return all samples (don't filter)
+            print(f"📊 No keywords defined for {gate_name}, keeping all {len(code_samples)} samples")
             return code_samples[:self.max_code_samples_per_gate]
         
         # Score samples by relevance
@@ -147,33 +151,45 @@ class LLMOptimizer:
         for sample in code_samples:
             sample_lower = sample.lower()
             score = sum(1 for keyword in keywords if keyword in sample_lower)
-            if score > 0:  # Only keep samples with at least one relevant keyword
+            # Keep samples with at least one relevant keyword OR if it's a short sample (likely important)
+            if score > 0 or len(sample.split()) < 10:
                 scored_samples.append((score, sample))
+        
+        # If no samples match keywords, keep the original samples (less aggressive filtering)
+        if not scored_samples:
+            print(f"📊 No keyword matches for {gate_name}, keeping original {len(code_samples)} samples")
+            return code_samples[:self.max_code_samples_per_gate]
         
         # Sort by relevance score (descending)
         scored_samples.sort(key=lambda x: x[0], reverse=True)
         
+        filtered_samples = [sample for _, sample in scored_samples[:self.max_code_samples_per_gate]]
+        print(f"📊 Filtered {len(code_samples)} → {len(filtered_samples)} samples for {gate_name} (keyword matching)")
+        
         # Return top samples
-        return [sample for _, sample in scored_samples[:self.max_code_samples_per_gate]]
+        return filtered_samples
     
     def _should_skip_llm_analysis(self, gate_name: str, code_samples: List[str]) -> bool:
         """Determine if LLM analysis should be skipped for performance"""
         
         # Skip if no code samples
         if not code_samples:
+            print(f"⚡ Skipping LLM for {gate_name} (no code samples)")
             return True
         
-        # Define low-priority gates that can be skipped if needed
+        # Define low-priority gates that can be skipped if needed (reduced list)
         low_priority_gates = [
-            'ui_error_tools',
-            'log_background_jobs',
-            'http_codes'
+            'ui_error_tools',  # Only keep truly low-priority gates
+            'log_background_jobs'
+            # Removed 'http_codes' to allow LLM analysis
         ]
         
-        # Skip low-priority gates with minimal samples
-        if gate_name.lower() in low_priority_gates and len(code_samples) < 2:
+        # Skip low-priority gates with minimal samples (lowered threshold)
+        if gate_name.lower() in low_priority_gates and len(code_samples) < 1:  # Changed from < 2 to < 1
+            print(f"⚡ Skipping LLM for {gate_name} (low priority with {len(code_samples)} samples)")
             return True
         
+        print(f"✅ LLM analysis approved for {gate_name} ({len(code_samples)} samples)")
         return False
     
     def _get_fallback_analysis(self, gate_name: str) -> Dict[str, Any]:
@@ -325,8 +341,20 @@ class FastLLMIntegrationManager:
                 'technology_insights': {}
             }
         
-        # Extract code samples from matches
-        code_samples = [match.get('match', '') for match in matches[:10]]
+        # Extract code samples from matches - FIX: Use correct field names
+        code_samples = []
+        for match in matches[:10]:  # Limit to 10 matches
+            # Try multiple field names for code content
+            code_text = (
+                match.get('matched_text', '') or 
+                match.get('match', '') or 
+                match.get('full_line', '') or 
+                str(match.get('pattern', ''))
+            )
+            if code_text and code_text.strip():
+                code_samples.append(code_text.strip())
+        
+        print(f"🔧 Extracted {len(code_samples)} code samples from {len(matches)} matches for {gate_name}")
         
         # Use optimizer for fast analysis
         return self.optimizer.optimize_gate_analysis(

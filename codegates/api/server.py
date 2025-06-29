@@ -174,6 +174,36 @@ except ImportError:
         'llm_batch_timeout': int(os.getenv('CODEGATES_LLM_BATCH_TIMEOUT', '30')),
     }
 
+# Add intake imports after existing imports, before the main app configuration
+try:
+    # Import intake assessment functionality
+    import sys
+    import os
+    from pathlib import Path
+    
+    # Add intake module to path
+    intake_path = Path(__file__).parent.parent.parent / "intake"
+    if intake_path.exists():
+        sys.path.insert(0, str(intake_path))
+        
+        # Import intake components with error handling
+        try:
+            from flow import create_analysis_flow, create_excel_analysis_flow
+            from nodes import OcpAssessmentNode, AnalyzeCode, FetchRepo, ProcessExcel, FetchJiraStories, GenerateReport
+            
+            INTAKE_AVAILABLE = True
+            print("✅ Intake assessment module available")
+        except ImportError as import_error:
+            INTAKE_AVAILABLE = False
+            print(f"⚠️ Intake components not available: {import_error}")
+    else:
+        INTAKE_AVAILABLE = False
+        print("⚠️ Intake module directory not found")
+        
+except Exception as e:
+    INTAKE_AVAILABLE = False
+    print(f"⚠️ Intake assessment initialization failed: {e}")
+
 # Create the main FastAPI app with lifecycle management
 app = FastAPI(
     title=API_TITLE,
@@ -725,7 +755,6 @@ class ScanRequest(BaseModel):
                             status_code=400,
                             detail=f"Cannot access repository: {result.stderr.strip()}"
                         )
-                        
             except subprocess.TimeoutExpired:
                 raise HTTPException(
                     status_code=408,
@@ -749,6 +778,7 @@ class GateResult(BaseModel):
     found: Optional[int] = Field(None, description="Actual number found")
     coverage: Optional[float] = Field(None, ge=0, le=100, description="Coverage percentage")
     quality_score: Optional[float] = Field(None, ge=0, le=100, description="Quality score")
+    matches: List[Dict[str, Any]] = Field(default_factory=list, description="Enhanced metadata for pattern matches")
 
 class ScanResult(BaseModel):
     scan_id: str = Field(..., description="Unique scan identifier")
@@ -1182,7 +1212,8 @@ def analyze_repository(repo_path: str, threshold: int, repository_url: Optional[
                     "expected": gate_score.expected,
                     "found": gate_score.found,
                     "coverage": gate_score.coverage,
-                    "quality_score": gate_score.quality_score
+                    "quality_score": gate_score.quality_score,
+                    "matches": gate_score.matches  # Include enhanced metadata directly from GateScore
                 })
             
             return {
@@ -2378,6 +2409,530 @@ async def get_timeout_configuration():
             "status": "error",
             "message": f"Failed to get timeout configuration: {str(e)}"
         }
+
+# Intake Assessment Models
+class ComponentData(BaseModel):
+    """Structured component data extracted from Excel or other sources"""
+    component_name: str = Field(..., description="Name of the component being assessed")
+    business_criticality: Optional[str] = Field(None, description="Business criticality (High/Medium/Low)")
+    current_environment: Optional[str] = Field(None, description="Current hosting environment")
+    application_type: Optional[str] = Field(None, description="Type of application")
+    technology_stack: Optional[Dict[str, Any]] = Field(None, description="Technology stack details")
+    dependencies: Optional[List[str]] = Field(None, description="List of dependencies")
+    component_declarations: Optional[Dict[str, bool]] = Field(None, description="Component declarations (Yes/No for each component)")
+    custom_fields: Optional[Dict[str, Any]] = Field(None, description="Additional custom fields from Excel")
+
+class IntakeAssessmentOptions(BaseModel):
+    include_patterns: Optional[List[str]] = Field(
+        default=[
+            "*.py", "*.js", "*.ts", "*.java", "*.go", "*.rb", "*.php",
+            "*.cpp", "*.h", "*.hpp", "*.c", "*.cs", "*.swift",
+            "*.yaml", "*.yml", "*.json", "*.xml", "*.html", "*.css",
+            "Dockerfile", "docker-compose*.yml", "*.sh", "*.bash",
+            "*.md", "*.rst", "*.txt"
+        ],
+        description="File patterns to include in analysis"
+    )
+    exclude_patterns: Optional[List[str]] = Field(
+        default=[
+            "tests/*", "test/*", "docs/*", "node_modules/*", "__pycache__/*",
+            "*.test.*", "*.spec.*", "*.min.*", "dist/*", "build/*",
+            ".git/*", ".github/*", ".vscode/*", "*.log"
+        ],
+        description="File patterns to exclude from analysis"
+    )
+    max_file_size: Optional[int] = Field(
+        default=100000,
+        description="Maximum file size in bytes to analyze"
+    )
+    use_cache: Optional[bool] = Field(
+        default=True,
+        description="Enable LLM response caching"
+    )
+    include_jira: Optional[bool] = Field(
+        default=False,
+        description="Include JIRA stories in assessment"
+    )
+
+class IntakeAssessmentRequest(BaseModel):
+    # Code analysis sources (at least one required)
+    repository_url: Optional[str] = Field(
+        None,
+        description="Git repository URL for code analysis"
+    )
+    local_directory: Optional[str] = Field(
+        None,
+        description="Local directory path for code analysis"
+    )
+    
+    # Component data (structured information)
+    component_data: Optional[ComponentData] = Field(
+        None,
+        description="Structured component information (extracted from Excel or other sources)"
+    )
+    
+    # Authentication and configuration
+    github_token: Optional[str] = Field(
+        None,
+        description="GitHub token for private repositories"
+    )
+    options: Optional[IntakeAssessmentOptions] = Field(
+        default=None,
+        description="Assessment configuration options"
+    )
+    
+    def validate_input(self):
+        """Validate that at least a repository or local directory is provided"""
+        if not self.repository_url and not self.local_directory:
+            raise HTTPException(
+                status_code=400,
+                detail="Either repository_url or local_directory must be provided for code analysis"
+            )
+
+class IntakeAssessmentResult(BaseModel):
+    assessment_id: str = Field(..., description="Unique assessment identifier")
+    status: str = Field(..., description="Assessment status: 'completed' | 'failed' | 'running'")
+    component_name: Optional[str] = Field(None, description="Assessed component name")
+    migration_score: Optional[float] = Field(None, ge=0, le=100, description="Migration readiness score (0-100)")
+    migration_feasibility: Optional[str] = Field(None, description="Migration feasibility rating")
+    reports: Optional[Dict[str, str]] = Field(None, description="Generated report file paths")
+    recommendations: Optional[List[str]] = Field(None, description="Migration recommendations")
+    component_analysis: Optional[Dict[str, Any]] = Field(None, description="Component analysis results")
+    error_message: Optional[str] = Field(None, description="Error message if assessment failed")
+
+# In-memory storage for intake assessment results (in production, use a database)
+intake_results = {}
+
+async def perform_intake_assessment(assessment_id: str, request: IntakeAssessmentRequest):
+    """Perform the actual intake assessment with comprehensive error handling"""
+    temp_dir = None
+    try:
+        # Update status to running
+        intake_results[assessment_id]["status"] = "running"
+        intake_results[assessment_id]["message"] = "Starting intake assessment..."
+        
+        # Validate input
+        request.validate_input()
+        
+        # Get options with defaults
+        options = request.options or IntakeAssessmentOptions()
+        
+        # Create unique temporary directory for assessment outputs
+        temp_dir = create_unique_temp_directory("intake_assessment_", "intake assessment directory")
+        register_temp_directory(temp_dir)
+        
+        # Initialize shared state for intake assessment
+        shared = {
+            "repo_url": request.repository_url,
+            "local_dir": request.local_directory,
+            "include_patterns": options.include_patterns,
+            "exclude_patterns": options.exclude_patterns,
+            "max_file_size": options.max_file_size,
+            "use_cache": options.use_cache,
+            "output_dir": temp_dir,
+            "github_token": request.github_token
+        }
+        
+        # Add component data if provided (structured approach)
+        if request.component_data:
+            # Convert ComponentData to the format expected by intake module
+            excel_validation = {
+                "component_name": request.component_data.component_name,
+                "business_criticality": request.component_data.business_criticality or "Medium",
+                "current_environment": request.component_data.current_environment or "Unknown",
+                "application_type": request.component_data.application_type or "Unknown"
+            }
+            
+            # Add any custom fields
+            if request.component_data.custom_fields:
+                excel_validation.update(request.component_data.custom_fields)
+            
+            # Set excel validation data in shared state
+            shared["excel_validation"] = excel_validation
+            shared["project_name"] = request.component_data.component_name
+            
+            # Add component declarations if provided
+            if request.component_data.component_declarations:
+                excel_components = {}
+                for component, declared in request.component_data.component_declarations.items():
+                    excel_components[component] = {"is_yes": declared}
+                shared["excel_components"] = excel_components
+            
+            # Add technology stack and dependencies
+            if request.component_data.technology_stack:
+                shared["technology_stack"] = request.component_data.technology_stack
+            
+            if request.component_data.dependencies:
+                shared["dependencies"] = request.component_data.dependencies
+        
+        print(f"🔄 Starting intake assessment for: {request.repository_url or request.local_directory or (request.component_data.component_name if request.component_data else 'Unknown')}")
+        
+        # Choose appropriate flow based on input type
+        if request.component_data and not request.repository_url and not request.local_directory:
+            # Pure component data assessment (no code analysis)
+            intake_results[assessment_id]["message"] = "Processing component data..."
+            analysis_flow = create_analysis_flow()  # Use analysis flow with only OCP assessment
+        elif request.component_data:
+            # Combined code + component data assessment  
+            intake_results[assessment_id]["message"] = "Analyzing repository with component data..."
+            analysis_flow = create_analysis_flow()  # Use analysis flow with code + OCP assessment
+        else:
+            # Code-only assessment
+            intake_results[assessment_id]["message"] = "Analyzing repository..."
+            analysis_flow = create_analysis_flow()
+        
+        # Run the intake assessment flow
+        intake_results[assessment_id]["message"] = "Running OCP migration assessment..."
+        
+        # Execute the flow in a thread to avoid blocking
+        await asyncio.to_thread(analysis_flow.run, shared)
+        
+        # Extract results from shared state
+        ocp_assessment = shared.get("ocp_assessment", {})
+        component_name = shared.get("project_name") or (request.component_data.component_name if request.component_data else "Unknown Component")
+        
+        # Parse migration score from assessment
+        migration_score = 0.0
+        migration_feasibility = "Unknown"
+        recommendations = []
+        
+        if ocp_assessment:
+            # Try to extract score from HTML content
+            html_content = ocp_assessment.get("html", "")
+            if "migration_score" in html_content.lower():
+                # Simple regex to extract score (this could be enhanced)
+                import re
+                score_match = re.search(r'score[:\s]*(\d+(?:\.\d+)?)', html_content, re.IGNORECASE)
+                if score_match:
+                    migration_score = float(score_match.group(1))
+            
+            # Determine feasibility based on score
+            if migration_score >= 90:
+                migration_feasibility = "Excellent"
+            elif migration_score >= 80:
+                migration_feasibility = "Good"
+            elif migration_score >= 70:
+                migration_feasibility = "Fair"
+            elif migration_score >= 60:
+                migration_feasibility = "Marginal"
+            else:
+                migration_feasibility = "Poor"
+        
+        # Collect generated reports
+        reports = {}
+        if "hard_gate_assessment" in shared:
+            reports["hard_gate_assessment"] = shared["hard_gate_assessment"]
+        if "intake_assessment_html" in shared:
+            reports["intake_assessment"] = shared["intake_assessment_html"]
+        if ocp_assessment:
+            reports["ocp_assessment"] = ocp_assessment
+        
+        # Get component analysis if available
+        component_analysis = shared.get("code_analysis", {}).get("component_analysis", {})
+        
+        # Update final results
+        intake_results[assessment_id].update({
+            "status": "completed",
+            "component_name": component_name,
+            "migration_score": migration_score,
+            "migration_feasibility": migration_feasibility,
+            "reports": reports,
+            "recommendations": recommendations,
+            "component_analysis": component_analysis,
+            "message": f"Intake assessment completed successfully for {component_name}",
+            "completed_at": datetime.now().isoformat()
+        })
+        
+        print(f"✅ Intake assessment completed for {component_name} with score: {migration_score}")
+        
+    except Exception as e:
+        print(f"❌ Intake assessment failed for {assessment_id}: {str(e)}")
+        
+        # Update status with error
+        intake_results[assessment_id].update({
+            "status": "failed",
+            "error_message": str(e),
+            "message": f"Intake assessment failed: {str(e)}",
+            "completed_at": datetime.now().isoformat()
+        })
+        
+    finally:
+        # Cleanup temporary directory
+        if temp_dir and os.path.exists(temp_dir):
+            print(f"🧹 Cleaning up intake assessment directory: {temp_dir}")
+            try:
+                cleanup_success = await cleanup_temp_directory(temp_dir, "intake assessment directory")
+                if cleanup_success:
+                    print(f"✅ Intake assessment directory cleaned up successfully")
+            except Exception as cleanup_error:
+                print(f"⚠️ Failed to cleanup intake assessment directory: {cleanup_error}")
+
+## Intake Assessment API Endpoints
+
+@api_v1.get("/intake/status")
+async def get_intake_status():
+    """Get intake assessment module status and configuration."""
+    try:
+        if not INTAKE_AVAILABLE:
+            return {
+                "available": False,
+                "message": "Intake assessment module not available"
+            }
+        
+        return {
+            "available": INTAKE_AVAILABLE,
+            "module": "OCP Migration Assessment",
+            "description": "OpenShift Container Platform migration readiness assessment",
+            "supported_inputs": [
+                "GitHub repositories",
+                "Local directories", 
+                "Excel files with component data"
+            ],
+            "assessment_types": [
+                "Hard Gate Assessment",
+                "Intake Assessment", 
+                "Migration Insights",
+                "Component Analysis"
+            ]
+        }
+        
+    except Exception as e:
+        return {
+            "available": False,
+            "error": str(e)
+        }
+
+@api_v1.post("/intake/assess", response_model=IntakeAssessmentResult)
+async def start_intake_assessment(request: IntakeAssessmentRequest, background_tasks: BackgroundTasks):
+    """
+    Start an intake assessment for OCP migration readiness.
+    
+    - Supports GitHub repositories, local directories, and Excel files
+    - Generates comprehensive migration assessment reports
+    - Returns assessment ID for status tracking
+    """
+    try:
+        if not INTAKE_AVAILABLE:
+            raise HTTPException(
+                status_code=503, 
+                detail="Intake assessment module not available"
+            )
+        
+        # Validate input
+        request.validate_input()
+        
+        # Generate assessment ID
+        assessment_id = str(uuid.uuid4())
+        
+        # Initialize assessment result
+        intake_results[assessment_id] = {
+            "assessment_id": assessment_id,
+            "status": "running",
+            "component_name": None,
+            "migration_score": None,
+            "migration_feasibility": None,
+            "reports": None,
+            "recommendations": None,
+            "component_analysis": None,
+            "error_message": None,
+            "message": "Assessment initiated",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        # Start background assessment
+        background_tasks.add_task(perform_intake_assessment, assessment_id, request)
+        
+        return IntakeAssessmentResult(
+            assessment_id=assessment_id,
+            status="running",
+            component_name=None,
+            migration_score=None,
+            migration_feasibility=None,
+            reports=None,
+            recommendations=None,
+            component_analysis=None,
+            error_message=None
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_v1.get("/intake/assess/{assessment_id}/status", response_model=IntakeAssessmentResult)
+async def get_intake_assessment_status(assessment_id: str):
+    """Get the status and results of a specific intake assessment."""
+    try:
+        if assessment_id not in intake_results:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        result = intake_results[assessment_id]
+        
+        return IntakeAssessmentResult(
+            assessment_id=result["assessment_id"],
+            status=result["status"],
+            component_name=result.get("component_name"),
+            migration_score=result.get("migration_score"),
+            migration_feasibility=result.get("migration_feasibility"),
+            reports=result.get("reports"),
+            recommendations=result.get("recommendations"),
+            component_analysis=result.get("component_analysis"),
+            error_message=result.get("error_message")
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_v1.get("/intake/assess/{assessment_id}/reports/{report_type}")
+async def get_intake_assessment_report(assessment_id: str, report_type: str):
+    """Get a specific report from an intake assessment."""
+    try:
+        if assessment_id not in intake_results:
+            raise HTTPException(status_code=404, detail="Assessment not found")
+        
+        result = intake_results[assessment_id]
+        
+        if result["status"] != "completed":
+            raise HTTPException(status_code=400, detail="Assessment not completed yet")
+        
+        reports = result.get("reports", {})
+        if report_type not in reports:
+            available_reports = list(reports.keys())
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Report type '{report_type}' not found. Available reports: {available_reports}"
+            )
+        
+        report_data = reports[report_type]
+        
+        # If it's HTML content, return as HTMLResponse
+        if "html" in report_data and report_type in ["ocp_assessment", "intake_assessment"]:
+            html_content = report_data.get("html", "")
+            if html_content:
+                return HTMLResponse(content=html_content, status_code=200)
+        
+        # For other report types, return JSON
+        return report_data
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@api_v1.get("/intake/assessments")
+async def list_intake_assessments():
+    """List all intake assessments with their current status."""
+    try:
+        assessments = []
+        for assessment_id, result in intake_results.items():
+            assessments.append({
+                "assessment_id": assessment_id,
+                "status": result["status"],
+                "component_name": result.get("component_name"),
+                "migration_score": result.get("migration_score"),
+                "migration_feasibility": result.get("migration_feasibility"),
+                "created_at": result.get("created_at"),
+                "completed_at": result.get("completed_at"),
+                "reports_available": list(result.get("reports", {}).keys()) if result.get("reports") else []
+            })
+        
+        # Sort by creation time (newest first)
+        assessments.sort(key=lambda x: x["created_at"], reverse=True)
+        
+        return {
+            "assessments": assessments,
+            "total_count": len(assessments)
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+class ExcelExtractionRequest(BaseModel):
+    excel_file_path: str = Field(..., description="Path to Excel file to extract data from")
+    sheet_name: Optional[str] = Field(None, description="Specific sheet name to process (optional)")
+
+@api_v1.post("/intake/extract-excel")
+async def extract_excel_data(request: ExcelExtractionRequest):
+    """
+    Extract structured component data from Excel files.
+    
+    This utility endpoint separates data extraction from assessment logic,
+    allowing the extracted data to be used with the intake assessment endpoint.
+    """
+    try:
+        if not INTAKE_AVAILABLE:
+            raise HTTPException(
+                status_code=503, 
+                detail="Intake assessment module not available"
+            )
+        
+        # Check if file exists
+        if not os.path.exists(request.excel_file_path):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Excel file not found: {request.excel_file_path}"
+            )
+        
+        # Extract data using intake module's Excel processor
+        try:
+            # Use the intake module's Excel processing logic
+            shared = {
+                "excel_file": request.excel_file_path,
+                "output_dir": "./temp",  # Temporary directory for processing
+            }
+            
+            if request.sheet_name:
+                shared["sheet_name"] = request.sheet_name
+            
+            # Create and run the Excel processor node
+            from nodes import ProcessExcel
+            excel_processor = ProcessExcel()
+            
+            # Process the Excel file
+            prep_result = excel_processor.prep(shared)
+            exec_result = excel_processor.exec(prep_result)
+            excel_processor.post(shared, prep_result, exec_result)
+            
+            # Extract the processed data
+            excel_validation = shared.get("excel_validation", {})
+            excel_components = shared.get("excel_components", {})
+            
+            # Convert to ComponentData format
+            component_declarations = {}
+            if excel_components:
+                for component, data in excel_components.items():
+                    component_declarations[component] = data.get("is_yes", False)
+            
+            # Build structured component data
+            component_data = ComponentData(
+                component_name=excel_validation.get("component_name", "Unknown Component"),
+                business_criticality=excel_validation.get("business_criticality"),
+                current_environment=excel_validation.get("current_environment"),
+                application_type=excel_validation.get("application_type"),
+                component_declarations=component_declarations if component_declarations else None,
+                custom_fields=excel_validation  # Include all Excel data as custom fields
+            )
+            
+            return {
+                "status": "success",
+                "component_data": component_data,
+                "extracted_fields": list(excel_validation.keys()),
+                "component_declarations_count": len(component_declarations),
+                "message": f"Successfully extracted data for component: {component_data.component_name}"
+            }
+            
+        except Exception as processing_error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to process Excel file: {str(processing_error)}"
+            )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
     start_server() 
